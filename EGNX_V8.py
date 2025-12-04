@@ -1,4 +1,11 @@
-import customtkinter as ctk
+try:
+    import customtkinter as ctk
+    HAS_CTK = True
+except Exception:
+    ctk = None
+    HAS_CTK = False
+    print("customtkinter not available — GUI creation will be disabled when imported.")
+
 from PIL import Image, ImageTk
 import warnings
 import math
@@ -7,15 +14,9 @@ from tkinter import ttk
 import tkinter as tk
 import os
 
-# ==============================
-# MAIN WINDOW
-app = ctk.CTk()
-app.title("Airport Control Panel")
+# Screen defaults (used for image sizing and any layout calculations)
 screen_width = 1920
 screen_height = 1080
-app.geometry(f"{screen_width}x{screen_height}+100+100")
-app.minsize(800, 600)
-app.state("zoomed")
 
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -245,9 +246,15 @@ def build_home_screen():
         content.pack(fill="both", expand=True)
 
 
-# Build the home screen on startup
-build_home_screen()
-
-# ==============================
-# MAIN LOOP
-app.mainloop()
+if __name__ == "__main__":
+    if not HAS_CTK:
+        print("customtkinter is not installed. To run the GUI locally, install customtkinter and run this file directly.")
+    else:
+        app = ctk.CTk()
+        app.title("Airport Control Panel")
+        app.geometry(f"{screen_width}x{screen_height}+100+100")
+        app.minsize(800, 600)
+        app.state("zoomed")
+        # Build the home screen and start the GUI
+        build_home_screen()
+        app.mainloop()
