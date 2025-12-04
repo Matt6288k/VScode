@@ -1,11 +1,3 @@
-try:
-    import customtkinter as ctk
-    HAS_CTK = True
-except Exception:
-    ctk = None
-    HAS_CTK = False
-    print("customtkinter not available — GUI creation will be disabled when imported.")
-
 from PIL import Image, ImageTk
 import warnings
 import math
@@ -20,18 +12,6 @@ screen_height = 1080
 
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
-
-# ==============================
-# BACKGROUND MAP
-bg_photo = None
-try:
-    bg_image = Image.open("EGNX_Map_zoom.tif")
-    bg_image = bg_image.resize((screen_width, screen_height), Image.Resampling.LANCZOS)
-    bg_photo = ImageTk.PhotoImage(bg_image)
-except FileNotFoundError:
-    print("Warning: EGNX_Map_zoom.tif not found — continuing with placeholder background")
-except Exception as e:
-    print(f"Warning: failed to load map image: {e}")
 
 # ==============================
 # NODES & EDGES
@@ -80,6 +60,8 @@ edges = {
     "STAND7b": ["STAND7N","STAND7a"],
     "STAND8b": ["STAND8N","STAND8a"],
 }
+
+# Build bidirectional edges
 for node, neighbors in list(edges.items()):
     for neighbor in neighbors:
         if neighbor not in edges:
@@ -137,6 +119,71 @@ class Aircraft:
         self.spline_route_idx_map = []
         self.dist_along_path = 0.0
         self.waiting_for_stopbar = False
+        self.status = "At Stand"
+
+# ==============================
+# CATMULL-ROM SPLINE
+def catmull_rom_spline(P0, P1, P2, P3, n_points=20):
+    """Generate Catmull-Rom spline points."""
+    points = []
+    for i in range(n_points):
+        t = i / n_points
+        t2 = t * t
+        t3 = t2 * t
+        x = 0.5 * ((2*P1[0]) + (-P0[0]+P2[0])*t + (2*P0[0]-5*P1[0]+4*P2[0]-P3[0])*t2 + (-P0[0]+3*P1[0]-3*P2[0]+P3[0])*t3)
+        y = 0.5 * ((2*P1[1]) + (-P0[1]+P2[1])*t + (2*P0[1]-5*P1[1]+4*P2[1]-P3[1])*t2 + (-P0[1]+3*P1[1]-3*P2[1]+P3[1])*t3)
+        points.append((x, y))
+    return points
+
+def build_spline_path(route, points_per_segment=20):
+    """Build a Catmull-Rom spline for the given route.
+    
+    Returns (spline_points, spline_route_idx_map) where spline_route_idx_map[i]
+    is the index j such that spline_points[i] corresponds to motion from route[j]
+    towards route[j+1].
+    """
+    spline_points = []
+    spline_route_idx_map = []
+    if not route or len(route) == 0:
+        return [], []
+    if len(route) == 1:
+        pt = nodes.get(route[0], (0, 0))
+        return [pt], [0]
+
+    n = len(route)
+    for i in range(n-1):
+        P0 = nodes[route[i-1]] if i > 0 else nodes[route[i]]
+        P1 = nodes[route[i]]
+        P2 = nodes[route[i+1]]
+        P3 = nodes[route[i+2]] if i+2 < n else nodes[route[i+1]]
+        seg = catmull_rom_spline(P0, P1, P2, P3, n_points=points_per_segment)
+        spline_points.extend(seg)
+        spline_route_idx_map.extend([i] * len(seg))
+
+    return spline_points, spline_route_idx_map
+
+def nearest_node_to(x, y, max_dist=50):
+    """Return the node name nearest to (x,y) within max_dist pixels, else None."""
+    best = None
+    best_d = float('inf')
+    for name, (nx, ny) in nodes.items():
+        d = math.hypot(nx - x, ny - y)
+        if d < best_d:
+            best_d = d
+            best = name
+    if best_d <= max_dist:
+        return best
+    return None
+
+# ==============================
+# CUSTOMTKINTER GUI SETUP
+try:
+    import customtkinter as ctk
+    HAS_CTK = True
+except Exception:
+    ctk = None
+    HAS_CTK = False
+    print("customtkinter not available — GUI creation will be disabled when imported.")
 
 active_aircraft = {}
 aircraft_rows = {}
