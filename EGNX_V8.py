@@ -203,16 +203,24 @@ def build_home_screen():
     try:
         map_path = os.path.join(script_dir, "EGNX_Map_Zoom.tif")
         top_img = Image.open(map_path)
-        
-        # Calculate height to maintain aspect ratio when width = screen_width
+
+        # Resize to fit screen width while maintaining aspect ratio
+        # Image is 2234x464, so aspect ratio is ~4.81:1
+        # Target height of ~300px, calculate width to maintain aspect ratio
+        target_height = 310
         original_width, original_height = top_img.size
-        aspect_ratio = original_height / original_width
-        new_height = int(screen_width * aspect_ratio)
-        
-        top_img = top_img.resize((screen_width, new_height), Image.Resampling.LANCZOS)
-        top_photo = ImageTk.PhotoImage(top_img)
-        img_label = ctk.CTkLabel(app, image=top_photo, text="")
-        img_label.image = top_photo
+        aspect_ratio = original_width / original_height  # width:height ratio
+        new_width = int(target_height * aspect_ratio)
+        top_img = top_img.resize((new_width, target_height), Image.Resampling.LANCZOS)
+        # Convert PIL Image to CTkImage so customtkinter can handle HighDPI scaling
+        try:
+            top_ctk_img = ctk.CTkImage(light_image=top_img, size=(new_width, target_height))
+            img_label = ctk.CTkLabel(app, image=top_ctk_img, text="")
+            img_label.image = top_ctk_img
+        except Exception:
+            top_photo = ImageTk.PhotoImage(top_img)
+            img_label = ctk.CTkLabel(app, image=top_photo, text="")
+            img_label.image = top_photo
         img_label.pack(fill="x", expand=False, padx=0, pady=0)
     except Exception as e:
         print(f"Error loading map image: {e}")
