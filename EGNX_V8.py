@@ -15,6 +15,7 @@ screen_width = 1920
 screen_height = 1080
 app.geometry(f"{screen_width}x{screen_height}+100+100")
 app.minsize(800, 600)
+app.state("zoomed")
 
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
