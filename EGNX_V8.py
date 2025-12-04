@@ -151,21 +151,23 @@ def build_home_screen():
         widget.destroy()
 
     # ===== TOP SECTION: Airport Map in green banner =====
-    top_banner = ctk.CTkFrame(app, fg_color="#00cc44", height=240)
-    top_banner.pack(fill="both", expand=False, padx=0, pady=0)
-    top_banner.pack_propagate(False)
-
     try:
         map_path = os.path.join(script_dir, "EGNX_Map_Zoom.tif")
         top_img = Image.open(map_path)
-        top_img = top_img.resize((screen_width, 240), Image.Resampling.LANCZOS)
+        
+        # Calculate height to maintain aspect ratio when width = screen_width
+        original_width, original_height = top_img.size
+        aspect_ratio = original_height / original_width
+        new_height = int(screen_width * aspect_ratio)
+        
+        top_img = top_img.resize((screen_width, new_height), Image.Resampling.LANCZOS)
         top_photo = ImageTk.PhotoImage(top_img)
-        img_label = ctk.CTkLabel(top_banner, image=top_photo, text="")
+        img_label = ctk.CTkLabel(app, image=top_photo, text="")
         img_label.image = top_photo
-        img_label.pack(fill="both", expand=True, padx=0, pady=0)
+        img_label.pack(fill="x", expand=False, padx=0, pady=0)
     except Exception as e:
         print(f"Error loading map image: {e}")
-        placeholder = ctk.CTkLabel(top_banner, text="[Map image not available]", font=("Arial", 16, "bold"), text_color="white")
+        placeholder = ctk.CTkLabel(app, text="[Map image not available]", font=("Arial", 16, "bold"), text_color="white")
         placeholder.pack(pady=10)
 
     # ===== MIDDLE SECTION: Controls Row =====
