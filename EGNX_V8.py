@@ -250,19 +250,59 @@ def build_home_screen():
     ctk.CTkRadioButton(tfr_frame, text="Medium", variable=tfr_var, value="Medium").pack(anchor="w", pady=5)
     ctk.CTkRadioButton(tfr_frame, text="High", variable=tfr_var, value="High").pack(anchor="w", pady=5)
 
-    # Center: Movements per hour / Delays
-    data_frame = ctk.CTkFrame(controls_main, fg_color="#cce5ff")
-    data_frame.pack(side="left", padx=20, pady=10, fill="both", expand=True)
-    data_frame.pack_propagate(False)
-    data_frame.configure(height=120, width=300)
+    # Middle: LVP Improvement checkboxes
+    lvp_frame = ctk.CTkFrame(controls_main)
+    lvp_frame.pack(side="left", padx=20, pady=10)
     
-    header_frame = ctk.CTkFrame(data_frame, fg_color="#99ccff")
-    header_frame.pack(fill="x", side="top")
-    ctk.CTkLabel(header_frame, text="Movements Per Hour", font=("Arial", 12, "bold")).pack(side="left", padx=10, pady=8, fill="x", expand=True)
-    ctk.CTkLabel(header_frame, text="Delays", font=("Arial", 12, "bold")).pack(side="left", padx=10, pady=8, fill="x", expand=True)
-    
-    content_frame = ctk.CTkFrame(data_frame, fg_color="#e6f5ff")
-    content_frame.pack(fill="both", expand=True, side="bottom")
+    ctk.CTkLabel(lvp_frame, text="LVP Improvement", font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 10))
+    lvp_stop_bars_var = tk.BooleanVar(value=False)
+    lvp_reduced_sep_var = tk.BooleanVar(value=False)
+    lvp_adaptive_seq_var = tk.BooleanVar(value=False)
+    ctk.CTkCheckBox(lvp_frame, text="Stop bars", variable=lvp_stop_bars_var).pack(anchor="w", pady=5)
+    ctk.CTkCheckBox(lvp_frame, text="Reduced separation", variable=lvp_reduced_sep_var).pack(anchor="w", pady=5)
+    ctk.CTkCheckBox(lvp_frame, text="Adaptive sequencing", variable=lvp_adaptive_seq_var).pack(anchor="w", pady=5)
+
+    # Center: Movements per hour / Delays in columnar format (matches status board style)
+    data_frame = ctk.CTkFrame(controls_main)
+    data_frame.pack(side="left", padx=20, pady=0, fill="both", expand=True)
+
+    # Metric variables - edit these values to update the display
+    movements_per_hour_var = tk.StringVar(value="45")
+    delays_var = tk.StringVar(value="15")
+    avg_taxi_time_var = tk.StringVar(value="15min")
+    runway_util_var = tk.StringVar(value="80secs")
+
+    metrics = [
+        ("Movements Per Hour", movements_per_hour_var),
+        ("Delays", delays_var),
+        ("Average Taxi Time", avg_taxi_time_var),
+        ("Runway Utilisation", runway_util_var),
+    ]
+
+    for title, var in metrics:
+        col_frame = ctk.CTkFrame(data_frame)
+        col_frame.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+
+        header = ctk.CTkLabel(
+            col_frame,
+            text=title,
+            font=("Arial", 12, "bold"),
+            fg_color="#99ccff",
+            text_color="black",
+            height=32,
+        )
+        header.pack(fill="x")
+        
+        content = ctk.CTkFrame(col_frame, fg_color="#e6f5ff")
+        content.pack(fill="both", expand=True)
+
+        ctk.CTkLabel(
+            content,
+            textvariable=var,
+            font=("Arial", 20, "bold"),
+            text_color="black",
+            anchor="center",
+        ).pack(fill="both", expand=True, padx=4, pady=4)
 
     # Right: Run Simulation button
     run_btn = ctk.CTkButton(
@@ -284,8 +324,9 @@ def build_home_screen():
     # Header row with 5 columns
     columns = ["Departures", "Taxiing", "Runway", "Airborne", "Arrivals"]
     for col_name in columns:
-        col_frame = ctk.CTkFrame(status_frame)
+        col_frame = ctk.CTkFrame(status_frame, corner_radius=10)
         col_frame.pack(side="left", fill="both", expand=True, padx=2, pady=2)
+        col_frame.pack_propagate(False)
         
         header = ctk.CTkLabel(
             col_frame, 
@@ -299,6 +340,8 @@ def build_home_screen():
         
         content = ctk.CTkFrame(col_frame, fg_color="#cce5ff")
         content.pack(fill="both", expand=True)
+        content.pack_propagate(False)
+        content.configure(height=80)
 
 
 if __name__ == "__main__":
