@@ -31,26 +31,28 @@ nodes = {
     "AQ": (771, 158), "NQ": (771, 283),
     "AR": (1320, 158), "NR": (1320, 283),
     "AS": (1045, 158), "NS": (1045, 283),
-    "TXY_A1": (1820, 158), "RWY27_A1": (1820, 70),
-    "TXY_B1": (1558, 158), "RWY27_B1": (1558, 70),
-    "TXY_C1": (645, 158), "RWY09_C1": (645, 70),
-    "TXY_D1": (214, 158), "RWY09_D1": (214, 70),
-    "TXY_E1": (105, 158), "RWY09_E1": (105, 70),
+    "TXY_A1": (1820, 158),"A1_HOLD": (1820, 125), "RWY27_A1": (1820, 70),
+    "TXY_B1": (1558, 158),"B1_HOLD": (1558, 125), "RWY27_B1": (1558, 70),
+    "TXY_C1": (645, 158),"C1_HOLD": (645, 125), "RWY09_C1": (645, 70),
+    "TXY_D1": (214, 158),"D1_HOLD": (214, 125), "RWY09_D1": (214, 70),
+    "TXY_E1": (105, 158),"E1_HOLD": (105, 125), "RWY09_E1": (105, 70),
 }
 
 edges = {
-    "RWY27_A1": ["TXY_A1","RWY27_B1"],
-    "RWY27_B1": ["TXY_B1","RWY09_C1"],
-    "RWY09_C1": ["TXY_C1","RWY09_D1"],
-    "RWY09_D1": ["RWY09_E1","TXY_D1"],
-    "TXY_E1": ["RWY09_E1","TXY_D1"],
-    "TXY_C1": ["TXY_D1","AQ"],
+    "RWY27_A1": ["A1_HOLD","RWY27_B1"],
+    "RWY27_B1": ["B1_HOLD","RWY09_C1"],
+    "RWY09_C1": ["C1_HOLD","RWY09_D1"],
+    "RWY09_D1": ["RWY09_E1","D1_HOLD"],
+    "E1_HOLD": ["RWY09_E1","TXY_E1"],
+    "TXY_D1": ["TXY_E1","D1_HOLD"],
+    "TXY_C1": ["TXY_D1","AQ","C1_HOLD"],
+    "TXY_B1": ["TXY_A1","B1_HOLD"],
+    "TXY_A1": ["AR","A1_HOLD"],
     "AQ": ["NQ","AS"],
     "NS": ["AS","NQ","NR","STAND1N","STAND2N","STAND3N","STAND4N","STAND5N","STAND6N","STAND7N","STAND8N"],
     "NQ": ["STAND1N","STAND2N","STAND3N","STAND4N"],
     "NR": ["STAND5N","STAND6N","STAND7N","STAND8N"],
     "AR": ["AS","NR","TXY_B1"],
-    "TXY_B1": ["TXY_A1"],
     "STAND1b": ["STAND1N","STAND1a"],
     "STAND2b": ["STAND2N","STAND2a"],
     "STAND3b": ["STAND3N","STAND3a"],
@@ -415,14 +417,15 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
             # Reached final destination
             aircraft_info['node'] = destination_node
             aircraft_info['position'] = nodes[destination_node]
-            # Move to Runway column if at a runway node
-            if destination_node.startswith('TXY_'):
-                move_aircraft_status(aircraft_info['callsign'], 'Runway')
             return
         
         # Get current and next node positions
         current_node = route[route_idx]
         next_node = route[route_idx + 1]
+        
+        # Check if we're passing through a HOLD node (moving away from it)
+        if current_node.endswith('_HOLD'):
+            move_aircraft_status(aircraft_info['callsign'], 'Runway')
         start_x, start_y = nodes[current_node]
         end_x, end_y = nodes[next_node]
         
@@ -718,9 +721,9 @@ def build_home_screen():
             
             # Determine runway target node
             if runway == "27":
-                runway_target = "TXY_A1"
+                runway_target = "A1_HOLD"
             else:  # runway == "09"
-                runway_target = "TXY_E1"
+                runway_target = "E1_HOLD"
             
             x, y = nodes["STAND1a"]
             # Create aircraft facing north initially
