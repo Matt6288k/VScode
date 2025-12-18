@@ -16,26 +16,26 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 # ==============================
 # NODES & EDGES
 nodes = {
-    "STAND1a": (846, 200), "STAND1b": (846, 215),
-    "STAND2a": (892, 200), "STAND2b": (892, 215),
-    "STAND3a": (938, 200), "STAND3b": (938, 215),
-    "STAND4a": (984, 200), "STAND4b": (984, 215),
-    "STAND5a": (1089, 200), "STAND5b": (1089, 215),
-    "STAND6a": (1135, 200), "STAND6b": (1135, 215),
-    "STAND7a": (1181, 200), "STAND7b": (1181, 215),
-    "STAND8a": (1227, 200), "STAND8b": (1227, 215),
-    "STAND1N": (846, 241), "STAND2N": (892, 241),
-    "STAND3N": (938, 241), "STAND4N": (984, 241),
-    "STAND5N": (1089, 241), "STAND6N": (1135, 241),
-    "STAND7N": (1181, 241), "STAND8N": (1227, 241),
-    "AQ": (790, 152), "NQ": (790, 241),
-    "AR": (1282, 152), "NR": (1282, 241),
-    "AS": (1036, 152), "NS": (1036, 241),
-    "TXY_A1": (1730, 152), "RWY27_A1": (1730, 90),
-    "TXY_B1": (1498, 152), "RWY27_B1": (1498, 90),
-    "TXY_C1": (675, 152), "RWY09_C1": (675, 90),
-    "TXY_D1": (287, 152), "RWY09_D1": (287, 90),
-    "TXY_E1": (190, 152), "RWY09_E1": (190, 90),
+    "STAND1a": (835, 218), "STAND1b": (835, 240),
+    "STAND2a": (886, 218), "STAND2b": (886, 240),
+    "STAND3a": (937, 218), "STAND3b": (937, 240),
+    "STAND4a": (987, 218), "STAND4b": (987, 240),
+    "STAND5a": (1104, 218), "STAND5b": (1104, 240),
+    "STAND6a": (1155, 218), "STAND6b": (1155, 240),
+    "STAND7a": (1206, 218), "STAND7b": (1206, 240),
+    "STAND8a": (1256, 218), "STAND8b": (1256, 240),
+    "STAND1N": (835, 283), "STAND2N": (886, 283),
+    "STAND3N": (937, 283), "STAND4N": (987, 283),
+    "STAND5N": (1104, 283), "STAND6N": (1155, 283),
+    "STAND7N": (1206, 283), "STAND8N": (1256, 283),
+    "AQ": (771, 158), "NQ": (771, 283),
+    "AR": (1320, 158), "NR": (1320, 283),
+    "AS": (1045, 158), "NS": (1045, 283),
+    "TXY_A1": (1820, 158), "RWY27_A1": (1820, 70),
+    "TXY_B1": (1558, 158), "RWY27_B1": (1558, 70),
+    "TXY_C1": (645, 158), "RWY09_C1": (645, 70),
+    "TXY_D1": (214, 158), "RWY09_D1": (214, 70),
+    "TXY_E1": (105, 158), "RWY09_E1": (105, 70),
 }
 
 edges = {
@@ -121,8 +121,7 @@ class Aircraft:
         self.waiting_for_stopbar = False
         self.status = "At Stand"
 
-# ==============================
-# CATMULL-ROM SPLINE
+
 def catmull_rom_spline(P0, P1, P2, P3, n_points=20):
     """Generate Catmull-Rom spline points."""
     points = []
@@ -189,11 +188,44 @@ active_aircraft = {}
 aircraft_rows = {}
 stop_bars = {}
 stop_bar_draw_ids = {}
+main_canvas = None  # Global reference to the canvas
+
+# ==============================
+# GRAPH DRAW FUNCTION
+def draw_graph(canvas):
+    """Draw nodes and edges on the canvas."""
+    # Draw edges (connections) first so they appear under the nodes
+    for node, neighbors in edges.items():
+        x1, y1 = nodes[node]
+        for neighbor in neighbors:
+            x2, y2 = nodes[neighbor]
+            canvas.create_line(x1, y1, x2, y2, fill="yellow", width=2, dash=(4,2))
+    
+    # Draw nodes (circles) on top
+    for name, (x, y) in nodes.items():
+        canvas.create_oval(x-3, y-3, x+3, y+3, fill="red")
+        canvas.create_text(x, y-10, text=name, fill="white", font=("Arial", 7, "bold"))
+
+# ==============================
+# DRAW AIRCRAFT
+def draw_aircraft(canvas, x, y, callsign="TEST"):
+    """Draw a blue triangle representing an aircraft at the given position."""
+    size = 12
+    # Position triangle so the front point touches the node position
+    triangle_id = canvas.create_polygon(
+        x, y,              # Front point at node position
+        x-size, y+2*size,  # Bottom left
+        x+size, y+2*size,  # Bottom right
+        fill="blue"
+    )
+    label_id = canvas.create_text(x, y-10, text=callsign, fill="white", font=("Arial", 10, "bold"))
+    return triangle_id, label_id
 
 # ==============================
 # HOME SCREEN DISPLAY
 def build_home_screen():
     """Build the ATC home screen UI matching the provided PNG layout."""
+    global main_canvas  # Make canvas accessible globally
     
     # Clear any existing widgets
     for widget in app.winfo_children():
@@ -204,24 +236,28 @@ def build_home_screen():
         map_path = os.path.join(script_dir, "EGNX_Map_Zoom.tif")
         top_img = Image.open(map_path)
 
-        # Resize to fit screen width while maintaining aspect ratio
-        # Image is 2234x464, so aspect ratio is ~4.81:1
-        # Target height of ~300px, calculate width to maintain aspect ratio
-        target_height = 310
-        original_width, original_height = top_img.size
-        aspect_ratio = original_width / original_height  # width:height ratio
-        new_width = int(target_height * aspect_ratio)
-        top_img = top_img.resize((new_width, target_height), Image.Resampling.LANCZOS)
-        # Convert PIL Image to CTkImage so customtkinter can handle HighDPI scaling
-        try:
-            top_ctk_img = ctk.CTkImage(light_image=top_img, size=(new_width, target_height))
-            img_label = ctk.CTkLabel(app, image=top_ctk_img, text="")
-            img_label.image = top_ctk_img
-        except Exception:
-            top_photo = ImageTk.PhotoImage(top_img)
-            img_label = ctk.CTkLabel(app, image=top_photo, text="")
-            img_label.image = top_photo
-        img_label.pack(fill="x", expand=False, padx=0, pady=0)
+        # Scale proportionally to fit screen width
+        original_width, original_height = top_img.size  # 2234x464
+        scale_factor = screen_width / original_width
+        new_width = screen_width
+        new_height = int(original_height * scale_factor)
+        top_img = top_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # Create a canvas to draw on top of the image
+        canvas_frame = ctk.CTkFrame(app)
+        canvas_frame.pack(fill="x", expand=False, padx=0, pady=0)
+        
+        main_canvas = tk.Canvas(canvas_frame, width=new_width, height=new_height, highlightthickness=0)
+        main_canvas.pack()
+        
+        # Draw the map image on the canvas
+        top_photo = ImageTk.PhotoImage(top_img)
+        main_canvas.create_image(0, 0, anchor="nw", image=top_photo)
+        main_canvas.image = top_photo  # Keep a reference to prevent garbage collection
+        
+        # Draw nodes and edges on top of the map
+        draw_graph(main_canvas)
+        
     except Exception as e:
         print(f"Error loading map image: {e}")
         placeholder = ctk.CTkLabel(app, text="[Map image not available]", font=("Arial", 16, "bold"), text_color="white")
@@ -305,6 +341,12 @@ def build_home_screen():
         ).pack(fill="both", expand=True, padx=4, pady=4)
 
     # Right: Run Simulation button
+    def run_simulation():
+        """Create an aircraft at STAND1a when simulation starts."""
+        if main_canvas and "STAND1a" in nodes:
+            x, y = nodes["STAND1a"]
+            draw_aircraft(main_canvas, x, y, "TEST001")
+    
     run_btn = ctk.CTkButton(
         controls_main, 
         text="▶ Run Simulation", 
@@ -313,7 +355,7 @@ def build_home_screen():
         hover_color="#1565c0",
         height=80,
         width=200,
-        command=lambda: None
+        command=run_simulation
     )
     run_btn.pack(side="right", padx=20, pady=10)
 
