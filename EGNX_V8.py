@@ -189,6 +189,8 @@ aircraft_rows = {}
 stop_bars = {}
 stop_bar_draw_ids = {}
 main_canvas = None  # Global reference to the canvas
+status_columns = {}  # Global reference to status board columns
+aircraft_labels = {}  # Track labels in each status column
 
 # ==============================
 # GRAPH DRAW FUNCTION
@@ -208,18 +210,363 @@ def draw_graph(canvas):
 
 # ==============================
 # DRAW AIRCRAFT
-def draw_aircraft(canvas, x, y, callsign="TEST"):
-    """Draw a blue triangle representing an aircraft at the given position."""
+def draw_aircraft(canvas, x, y, callsign="TEST", direction="north"):
+    """Draw a blue triangle representing an aircraft at the given position.
+    
+    The front tip of the triangle is always at position (x, y).
+    
+    Args:
+        direction: "north" (up), "right" for runway 09 (East), "left" for runway 27 (West)
+    """
     size = 12
-    # Position triangle so the front point touches the node position
-    triangle_id = canvas.create_polygon(
-        x, y,              # Front point at node position
-        x-size, y+2*size,  # Bottom left
-        x+size, y+2*size,  # Bottom right
-        fill="blue"
-    )
-    label_id = canvas.create_text(x, y-10, text=callsign, fill="white", font=("Arial", 10, "bold"))
+    
+    if direction == "north":
+        # Triangle pointing up (north) - tip at (x, y)
+        triangle_id = canvas.create_polygon(
+            x, y,               # Front point at top
+            x-size, y+2*size,   # Bottom left
+            x+size, y+2*size,   # Bottom right
+            fill="blue"
+        )
+    elif direction == "right":
+        # Triangle pointing right (for runway 09) - tip at (x, y)
+        triangle_id = canvas.create_polygon(
+            x, y,               # Front point at right
+            x-2*size, y-size,   # Top left
+            x-2*size, y+size,   # Bottom left
+            fill="blue"
+        )
+    else:  # direction == "left"
+        # Triangle pointing left (for runway 27) - tip at (x, y)
+        triangle_id = canvas.create_polygon(
+            x, y,               # Front point at left
+            x+2*size, y-size,   # Top right
+            x+2*size, y+size,   # Bottom right
+            fill="blue"
+        )
+    
+    label_id = canvas.create_text(x, y-size-10, text=callsign, fill="white", font=("Arial", 10, "bold"))
     return triangle_id, label_id
+
+# ==============================
+# STATUS BOARD FUNCTIONS
+def add_aircraft_to_status(callsign, column_name):
+    """Add aircraft to a status column."""
+    if column_name in status_columns:
+        label = ctk.CTkLabel(
+            status_columns[column_name],
+            text=callsign,
+            font=("Arial", 11, "bold"),
+            text_color="black"
+        )
+        label.pack(anchor="w", padx=5, pady=2)
+        
+        # Store label reference
+        if callsign not in aircraft_labels:
+            aircraft_labels[callsign] = {}
+        aircraft_labels[callsign]['label'] = label
+        aircraft_labels[callsign]['column'] = column_name
+
+def move_aircraft_status(callsign, new_column):
+    """Move aircraft from current column to new column."""
+    if callsign in aircraft_labels:
+        # Remove from old column
+        old_label = aircraft_labels[callsign].get('label')
+        if old_label:
+            old_label.destroy()
+        
+        # Add to new column
+        add_aircraft_to_status(callsign, new_column)
+
+def remove_aircraft_from_status(callsign):
+    """Remove aircraft from status board."""
+    if callsign in aircraft_labels:
+        label = aircraft_labels[callsign].get('label')
+        if label:
+            label.destroy()
+        del aircraft_labels[callsign]
+
+# ==============================
+# PUSHBACK AIRCRAFT
+def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right", steps=30, runway_target=None):
+    """Animate aircraft pushback from current position to target node.
+    
+    Aircraft starts facing north and gradually rotates to final_direction near the end.
+    After pushback completes, starts taxi to runway if runway_target is provided.
+    """
+    import math
+    
+    start_x, start_y = aircraft_info['position']
+    end_x, end_y = nodes[target_node]
+    
+    step_x = (end_x - start_x) / steps
+    step_y = (end_y - start_y) / steps
+    rotation_start_step = int(steps * 0.7)  # Start rotation at 70% of journey
+    rotation_steps = steps - rotation_start_step
+    
+    # Define angles: north = -90 degrees (pointing up), right = 0 degrees, left = 180 degrees
+    start_angle = -90  # North
+    if final_direction == "left":
+        end_angle = 0  # Turn right (clockwise) to east - 90 degree turn
+    else:  # left
+        end_angle = -180  # Turn left (counterclockwise) to west - 90 degree turn
+    
+    # Flag to track if we've moved to Taxiing status
+    moved_to_taxiing = [False]
+    
+    def animate_step(current_step=0):
+        # Move to taxiing column on first movement
+        if current_step == 1 and not moved_to_taxiing[0]:
+            move_aircraft_status(aircraft_info['callsign'], "Taxiing")
+            moved_to_taxiing[0] = True
+        
+        if current_step >= steps:
+            # Final position - update aircraft info
+            aircraft_info['position'] = (end_x, end_y)
+            aircraft_info['node'] = target_node
+            aircraft_info['direction'] = final_direction
+            
+            # Start taxi to runway if target provided
+            if runway_target:
+                app.after(500, lambda: taxi_aircraft(canvas, aircraft_info, runway_target))
+            return
+        
+        # Calculate current position
+        curr_x = start_x + (step_x * current_step)
+        curr_y = start_y + (step_y * current_step)
+        
+        # Calculate current angle with smooth rotation
+        if current_step < rotation_start_step:
+            current_angle = start_angle
+        else:
+            # Smooth interpolation during rotation
+            rotation_progress = (current_step - rotation_start_step) / rotation_steps
+            current_angle = start_angle + (end_angle - start_angle) * rotation_progress
+        
+        # Convert angle to radians
+        angle_rad = math.radians(current_angle)
+        
+        # Update triangle position based on angle
+        size = 12
+        # Calculate triangle points rotated around the tip
+        # Tip is always at (curr_x, curr_y)
+        # Base points are offset from tip
+        
+        # For a triangle pointing right (0 degrees), the points would be:
+        # tip: (0, 0), left back: (-2*size, -size), left bottom: (-2*size, size)
+        # We rotate these relative positions
+        
+        # Define base triangle (pointing right at 0 degrees)
+        base_points = [
+            (0, 0),              # Tip
+            (-2*size, -size),    # Upper back
+            (-2*size, size)      # Lower back
+        ]
+        
+        # Rotate and translate points
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+        
+        rotated_points = []
+        for px, py in base_points:
+            # Rotate
+            rx = px * cos_a - py * sin_a
+            ry = px * sin_a + py * cos_a
+            # Translate to current position
+            rotated_points.extend([curr_x + rx, curr_y + ry])
+        
+        canvas.coords(aircraft_info['triangle_id'], *rotated_points)
+        
+        # Update label position
+        canvas.coords(aircraft_info['label_id'], curr_x, curr_y-size-10)
+        
+        # Update stored position
+        aircraft_info['position'] = (curr_x, curr_y)
+        
+        # Schedule next step
+        app.after(50, animate_step, current_step + 1)
+    
+    animate_step()
+
+# ==============================
+# TAXI AIRCRAFT ALONG PATH
+def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
+    """Animate aircraft taxiing from current node to destination using pathfinding."""
+    import math
+    
+    # Get current node from aircraft info
+    current_node = aircraft_info.get('node', 'STAND1N')
+    
+    # Find path using dijkstra
+    route = dijkstra(current_node, destination_node)
+    
+    if not route:
+        print(f"No route found from {current_node} to {destination_node}")
+        return
+    
+    aircraft_info['route'] = route
+    aircraft_info['route_index'] = 0
+    
+    def move_to_next_node():
+        """Move aircraft to the next node in the route."""
+        route_idx = aircraft_info.get('route_index', 0)
+        
+        if route_idx >= len(route) - 1:
+            # Reached final destination
+            aircraft_info['node'] = destination_node
+            aircraft_info['position'] = nodes[destination_node]
+            # Move to Runway column if at a runway node
+            if destination_node.startswith('TXY_'):
+                move_aircraft_status(aircraft_info['callsign'], 'Runway')
+            return
+        
+        # Get current and next node positions
+        current_node = route[route_idx]
+        next_node = route[route_idx + 1]
+        start_x, start_y = nodes[current_node]
+        end_x, end_y = nodes[next_node]
+        
+        # Calculate distance and steps
+        distance = math.hypot(end_x - start_x, end_y - start_y)
+        steps = max(int(distance / speed), 1)
+        step_x = (end_x - start_x) / steps
+        step_y = (end_y - start_y) / steps
+        
+        # Calculate target angle for this segment
+        target_angle = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
+        
+        # Get current heading from aircraft info (or initialize to target angle)
+        if 'heading' not in aircraft_info:
+            aircraft_info['heading'] = target_angle
+        
+        current_heading = aircraft_info['heading']
+        
+        # Calculate look-ahead angle for next segment if it exists
+        next_segment_angle = target_angle
+        has_next_segment = False
+        if route_idx + 2 < len(route):
+            next_next_node = route[route_idx + 2]
+            next_end_x, next_end_y = nodes[next_next_node]
+            next_segment_angle = math.degrees(math.atan2(next_end_y - end_y, next_end_x - end_x))
+            has_next_segment = True
+        
+        # Turn parameters
+        turn_zone_distance = 10  # Start turning within 15 pixels of node
+        max_turn_per_step = 8.0  # Moderate turn rate for realistic steering (degrees per step)
+        wheelbase = 40  # Distance from nose to main gear (affects turning behavior)
+        corner_cut_radius = 10  # How much to cut the corner (pixels)
+        
+        def animate_segment(step=0):
+            if step >= steps:
+                # Reached next node, move to the next segment immediately without delay
+                aircraft_info['route_index'] = route_idx + 1
+                aircraft_info['node'] = next_node
+                aircraft_info['position'] = nodes[next_node]
+                # Continue immediately to next segment for smooth transition
+                move_to_next_node()
+                return
+                return
+            
+            # Calculate base position on straight line (nose/front of aircraft)
+            base_x = start_x + (step_x * step)
+            base_y = start_y + (step_y * step)
+            
+            # Calculate distance to next node
+            dist_to_next_node = math.hypot(end_x - base_x, end_y - base_y)
+            
+            # Calculate angle difference to next segment (if it exists)
+            angle_diff_to_next = 0
+            if has_next_segment:
+                angle_diff_to_next = next_segment_angle - target_angle
+                while angle_diff_to_next > 180:
+                    angle_diff_to_next -= 360
+                while angle_diff_to_next < -180:
+                    angle_diff_to_next += 360
+            
+            # Apply smooth corner cutting if we have a next segment, we're in the turn zone, and there's a significant angle change
+            curr_x = base_x
+            curr_y = base_y
+            
+            # Only apply corner cutting if the angle change is significant (more than 5 degrees)
+            if has_next_segment and dist_to_next_node <= turn_zone_distance and abs(angle_diff_to_next) > 5:
+                # Calculate how much to cut the corner based on distance to node
+                # Use a smooth easing function (cubic) for even smoother transition
+                linear_factor = 1.0 - (dist_to_next_node / turn_zone_distance)  # 0 at edge, 1 at node
+                cut_factor = linear_factor * linear_factor * linear_factor  # Cubic easing for smoothness
+                
+                # Calculate bisector angle (halfway between current and next segment)
+                bisector_angle = target_angle + (angle_diff_to_next * 0.5)
+                bisector_rad = math.radians(bisector_angle)
+                
+                # Offset position toward the bisector to smoothly cut the corner
+                offset = corner_cut_radius * cut_factor
+                curr_x = base_x + offset * math.cos(bisector_rad)
+                curr_y = base_y + offset * math.sin(bisector_rad)
+            
+            # Determine which angle to turn toward - only if angle difference is significant
+            if dist_to_next_node <= turn_zone_distance and has_next_segment and abs(angle_diff_to_next) > 5:
+                # Within turn zone - start turning toward next segment
+                turn_target = next_segment_angle
+            else:
+                # Outside turn zone - face current segment direction
+                turn_target = target_angle
+            
+            # Gradually adjust heading toward turn target (tricycle steering)
+            heading = aircraft_info['heading']
+            angle_diff = turn_target - heading
+            
+            # Normalize angle difference to [-180, 180]
+            while angle_diff > 180:
+                angle_diff -= 360
+            while angle_diff < -180:
+                angle_diff += 360
+            
+            # Apply limited turn rate (tricycle steering)
+            if abs(angle_diff) > max_turn_per_step:
+                heading += max_turn_per_step if angle_diff > 0 else -max_turn_per_step
+            else:
+                heading = turn_target
+            
+            aircraft_info['heading'] = heading
+            
+            # Calculate position of main landing gear (rear wheels)
+            # The main gear is behind the nose by the wheelbase distance
+            angle_rad = math.radians(heading)
+            rear_x = curr_x - wheelbase * math.cos(angle_rad)
+            rear_y = curr_y - wheelbase * math.sin(angle_rad)
+            
+            # For tricycle steering, the triangle should pivot around the rear position
+            # The nose is at curr_x, curr_y and the body extends back from there
+            size = 12
+            
+            # Define triangle with nose at origin, body extending backward
+            base_points = [
+                (0, 0),              # Nose (front wheel at path position)
+                (-2*size, -size),    # Upper rear
+                (-2*size, size)      # Lower rear
+            ]
+            
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+            
+            rotated_points = []
+            for px, py in base_points:
+                rx = px * cos_a - py * sin_a
+                ry = px * sin_a + py * cos_a
+                rotated_points.extend([curr_x + rx, curr_y + ry])
+            
+            canvas.coords(aircraft_info['triangle_id'], *rotated_points)
+            canvas.coords(aircraft_info['label_id'], curr_x, curr_y - size - 10)
+            
+            aircraft_info['position'] = (curr_x, curr_y)
+            aircraft_info['rear_position'] = (rear_x, rear_y)  # Track rear for reference
+            
+            # Schedule next step
+            app.after(50, animate_segment, step + 1)
+        
+        animate_segment()
+    
+    move_to_next_node()
 
 # ==============================
 # HOME SCREEN DISPLAY
@@ -286,6 +633,15 @@ def build_home_screen():
     ctk.CTkRadioButton(tfr_frame, text="Medium", variable=tfr_var, value="Medium").pack(anchor="w", pady=5)
     ctk.CTkRadioButton(tfr_frame, text="High", variable=tfr_var, value="High").pack(anchor="w", pady=5)
 
+    # Middle-left-2: Runway in use
+    runway_frame = ctk.CTkFrame(controls_main)
+    runway_frame.pack(side="left", padx=20, pady=10)
+    
+    ctk.CTkLabel(runway_frame, text="Runway in use", font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 10))
+    runway_var = tk.StringVar(value="27")
+    ctk.CTkRadioButton(runway_frame, text="09", variable=runway_var, value="09").pack(anchor="w", pady=5)
+    ctk.CTkRadioButton(runway_frame, text="27", variable=runway_var, value="27").pack(anchor="w", pady=5)
+
     # Middle: LVP Improvement checkboxes
     lvp_frame = ctk.CTkFrame(controls_main)
     lvp_frame.pack(side="left", padx=20, pady=10)
@@ -342,10 +698,50 @@ def build_home_screen():
 
     # Right: Run Simulation button
     def run_simulation():
-        """Create an aircraft at STAND1a when simulation starts."""
+        """Create an aircraft at STAND1a when simulation starts and pushback to STAND1N."""
         if main_canvas and "STAND1a" in nodes:
+            # Clear all existing aircraft from canvas
+            for callsign, ac_info in active_aircraft.items():
+                if 'triangle_id' in ac_info and ac_info['triangle_id']:
+                    main_canvas.delete(ac_info['triangle_id'])
+                if 'label_id' in ac_info and ac_info['label_id']:
+                    main_canvas.delete(ac_info['label_id'])
+                # Remove from status board
+                remove_aircraft_from_status(callsign)
+            
+            # Clear the active aircraft dictionary
+            active_aircraft.clear()
+            
+            # Get runway direction
+            runway = runway_var.get()
+            final_direction = "right" if runway == "09" else "left"
+            
+            # Determine runway target node
+            if runway == "27":
+                runway_target = "TXY_A1"
+            else:  # runway == "09"
+                runway_target = "TXY_E1"
+            
             x, y = nodes["STAND1a"]
-            draw_aircraft(main_canvas, x, y, "TEST001")
+            # Create aircraft facing north initially
+            triangle_id, label_id = draw_aircraft(main_canvas, x, y, "TEST001", "north")
+            
+            # Store aircraft information
+            aircraft_info = {
+                'callsign': 'TEST001',
+                'position': (x, y),
+                'node': 'STAND1a',
+                'triangle_id': triangle_id,
+                'label_id': label_id,
+                'direction': 'north'
+            }
+            active_aircraft['TEST001'] = aircraft_info
+            
+            # Add to Departures column
+            add_aircraft_to_status('TEST001', 'Departures')
+            
+            # Start pushback after a short delay, with runway target for subsequent taxi
+            app.after(1000, lambda: pushback_aircraft(main_canvas, aircraft_info, "STAND1N", final_direction, runway_target=runway_target))
     
     run_btn = ctk.CTkButton(
         controls_main, 
@@ -365,6 +761,9 @@ def build_home_screen():
 
     # Header row with 5 columns
     columns = ["Departures", "Taxiing", "Runway", "Airborne", "Arrivals"]
+    global status_columns
+    status_columns = {}
+    
     for col_name in columns:
         col_frame = ctk.CTkFrame(status_frame, corner_radius=10)
         col_frame.pack(side="left", fill="both", expand=True, padx=2, pady=2)
@@ -384,6 +783,9 @@ def build_home_screen():
         content.pack(fill="both", expand=True)
         content.pack_propagate(False)
         content.configure(height=80)
+        
+        # Store reference to content frame
+        status_columns[col_name] = content
 
 
 if __name__ == "__main__":
