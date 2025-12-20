@@ -191,6 +191,8 @@ active_aircraft = {}
 aircraft_rows = {}
 stop_bars = {}
 stop_bar_draw_ids = {}
+stop_bar_disabled_until = {}  # Track when each stop bar should turn back on
+runway_protected = True  # Track if runway is protected (stop bars on)
 main_canvas = None  # Global reference to the canvas
 status_columns = {}  # Global reference to status board columns
 aircraft_labels = {}  # Track labels in each status column
@@ -210,6 +212,99 @@ def draw_graph(canvas):
     for name, (x, y) in nodes.items():
         canvas.create_oval(x-3, y-3, x+3, y+3, fill="red")
         canvas.create_text(x, y-10, text=name, fill="white", font=("Arial", 7, "bold"))
+
+# ==============================
+# STOP BARS
+# Manual pixel coordinates for stop bar lights at each hold point
+# Format: "HOLD_NAME": {"red": [(x1,y1), (x2,y2), ...], "green": [(x1,y1), (x2,y2), ...]}
+STOP_BAR_POSITIONS = {
+    "A1_HOLD": {
+        "red": [(1815, 125), (1820, 125), (1825, 125), (1830, 125), (1835, 125), (1840, 125)],  # Add 6 red light positions here: [(x1,y1), (x2,y2), (x3,y3), (x4,y4), (x5,y5), (x6,y6)]
+        "green": []  # Add 4 green light positions here: [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
+    },
+    "B1_HOLD": {
+        "red": [],
+        "green": []
+    },
+    "C1_HOLD": {
+        "red": [],
+        "green": []
+    },
+    "D1_HOLD": {
+        "red": [],
+        "green": []
+    },
+    "E1_HOLD": {
+        "red": [],
+        "green": []
+    }
+}
+
+def draw_stop_bars(canvas):
+    """Draw stop bars at runway hold points using manual pixel coordinates.
+    
+    Red stop bar lights are always on, and turn off when an aircraft at that hold
+    is cleared to cross (runway is clear). Lights stay off for 3 seconds after crossing.
+    """
+    global stop_bar_draw_ids, stop_bar_disabled_until
+    import time
+    
+    # Clear existing stop bars
+    for items in stop_bar_draw_ids.values():
+        for item_id in items:
+            canvas.delete(item_id)
+    stop_bar_draw_ids.clear()
+    
+    current_time = time.time()
+    
+    # Check which hold points have aircraft that are cleared to cross
+    cleared_holds = set()
+    for callsign, info in active_aircraft.items():
+        node = info.get('node')
+        # If aircraft is at a hold point and runway is clear, turn off that stop bar
+        if node and node.endswith('_HOLD') and is_runway_clear():
+            cleared_holds.add(node)
+            # Set the timer for when this stop bar should turn back on (1.5 seconds from now)
+            if node not in stop_bar_disabled_until or stop_bar_disabled_until[node] < current_time:
+                stop_bar_disabled_until[node] = current_time + 1.5  # 1.5 second delay
+    
+    for hold_name, positions in STOP_BAR_POSITIONS.items():
+        if not positions.get("red"):
+            continue  # Skip if no red positions defined
+            
+        items = []
+        
+        # Red lights are OFF when:
+        # 1. Aircraft at this hold is cleared, OR
+        # 2. Within the 3-second delay period after crossing
+        # Red lights are ON otherwise (default)
+        is_within_delay_period = hold_name in stop_bar_disabled_until and current_time < stop_bar_disabled_until[hold_name]
+        show_red_lights = (hold_name not in cleared_holds) and (not is_within_delay_period)
+        
+        # Draw red stop bar lights
+        if show_red_lights:
+            for x, y in positions.get("red", []):
+                light_id = canvas.create_oval(
+                    x-2, y-2, x+2, y+2,
+                    fill="red", outline="red", width=1
+                )
+                canvas.tag_raise(light_id)  # Bring to front
+                items.append(light_id)
+        
+        if items:
+            stop_bar_draw_ids[hold_name] = items
+            items.append(light_id)
+        
+        if items:
+            stop_bar_draw_ids[hold_name] = items
+
+def update_stop_bars(canvas):
+    """Update stop bar lights based on runway status."""
+    if not canvas:
+        return
+    
+    # Redraw all stop bars with current runway status
+    draw_stop_bars(canvas)
 
 # ==============================
 # DRAW AIRCRAFT
@@ -437,17 +532,36 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
                 else:  # RWY09_E1
                     airborne_node = "RWY09_AirBorne"
                 
-                # Start takeoff after a short delay
-                app.after(500, lambda: takeoff_aircraft(canvas, aircraft_info, airborne_node))
+                # Start takeoff immediately
+                takeoff_aircraft(canvas, aircraft_info, airborne_node)
             return
         
         # Get current and next node positions
         current_node = route[route_idx]
         next_node = route[route_idx + 1]
         
-        # Check if we're passing through a HOLD node (moving away from it)
+        # Check if we're about to pass through a HOLD node (departing from it)
+        # If so, check if runway is clear before proceeding
         if current_node.endswith('_HOLD'):
-            move_aircraft_status(aircraft_info['callsign'], 'Runway')
+            # Check if stop bar at this hold point is illuminated (red lights on)
+            stop_bar_illuminated = current_node in stop_bar_draw_ids and len(stop_bar_draw_ids.get(current_node, [])) > 0
+            
+            if not is_runway_clear() or stop_bar_illuminated:
+                # Runway is occupied or stop bar is on, wait and check again
+                aircraft_info['waiting_at_hold'] = True
+                app.after(1000, move_to_next_node)  # Check again in 1 second
+                # Update stop bars in case this aircraft's presence changes the state
+                if main_canvas:
+                    update_stop_bars(main_canvas)
+                return
+            else:
+                # Runway is clear and stop bar is off, proceed and update status
+                aircraft_info['waiting_at_hold'] = False
+                move_aircraft_status(aircraft_info['callsign'], 'Runway')
+                # Update stop bars to show runway is now occupied
+                if main_canvas:
+                    update_stop_bars(main_canvas)
+        
         start_x, start_y = nodes[current_node]
         end_x, end_y = nodes[next_node]
         
@@ -594,6 +708,31 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
     move_to_next_node()
 
 # ==============================
+# RUNWAY OCCUPANCY CHECK
+def is_runway_clear():
+    """Check if the runway is clear (no aircraft in Runway status or at runway nodes)."""
+    global runway_protected
+    
+    # Check if any aircraft is in the Runway status column
+    for callsign, info in active_aircraft.items():
+        if callsign in aircraft_labels:
+            current_column = aircraft_labels[callsign].get('column')
+            if current_column == 'Runway':
+                runway_protected = False  # Runway occupied
+                return False
+    
+    # Also check if any aircraft is at a runway node
+    runway_nodes = ['RWY27_A1', 'RWY27_B1', 'RWY09_C1', 'RWY09_D1', 'RWY09_E1']
+    for callsign, info in active_aircraft.items():
+        if info.get('node') in runway_nodes:
+            runway_protected = False  # Runway occupied
+            return False
+    
+    # Runway is clear - reset protection for next aircraft
+    runway_protected = True
+    return True
+
+# ==============================
 # TAKEOFF AIRCRAFT
 def takeoff_aircraft(canvas, aircraft_info, airborne_node):
     """Animate aircraft taking off from runway to airborne node.
@@ -612,21 +751,25 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
     dy = end_y - start_y
     total_distance = math.hypot(dx, dy)
     
-    # Calculate heading for takeoff roll
-    heading = math.degrees(math.atan2(dy, dx))
-    aircraft_info['heading'] = heading
+    # Calculate target heading for takeoff roll
+    target_heading = math.degrees(math.atan2(dy, dx))
+    
+    # Preserve current heading from taxi (smooth transition)
+    if 'heading' not in aircraft_info:
+        aircraft_info['heading'] = target_heading
     
     # Takeoff parameters
     initial_speed = 5  # Starting speed (pixels per frame)
     final_speed = 20   # Speed at rotation/liftoff (pixels per frame)
     acceleration_distance = total_distance * 0.8  # Accelerate for 80% of runway
+    max_turn_per_step = 8.0  # Same as taxi turning rate for consistency
     
     # Total steps based on average speed
     avg_speed = (initial_speed + final_speed) / 2
     total_steps = int(total_distance / avg_speed)
     
-    # Move to Airborne status column at start of takeoff roll
-    move_aircraft_status(aircraft_info['callsign'], 'Airborne')
+    # Track if we've moved to airborne status
+    moved_to_airborne = [False]
     
     def animate_takeoff(step=0):
         if step >= total_steps:
@@ -638,10 +781,22 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
             aircraft_info['position'] = (end_x, end_y)
             aircraft_info['node'] = airborne_node
             
+            # Remove from status board after 10 seconds
+            callsign = aircraft_info['callsign']
+            app.after(10000, lambda: remove_aircraft_from_status(callsign))
+            
             return
         
         # Calculate progress (0.0 to 1.0)
         progress = step / total_steps
+        
+        # Move to Airborne status column at approximately 50% of takeoff roll
+        if progress >= 0.5 and not moved_to_airborne[0]:
+            move_aircraft_status(aircraft_info['callsign'], 'Airborne')
+            moved_to_airborne[0] = True
+            # Update stop bars - runway is now clear
+            if main_canvas:
+                update_stop_bars(main_canvas)
         
         # Calculate current speed with acceleration
         if progress < (acceleration_distance / total_distance):
@@ -667,6 +822,24 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
         
         curr_x = start_x + dx * t
         curr_y = start_y + dy * t
+        
+        # Gradually adjust heading toward target (same as taxi behavior)
+        heading = aircraft_info['heading']
+        angle_diff = target_heading - heading
+        
+        # Normalize angle difference to [-180, 180]
+        while angle_diff > 180:
+            angle_diff -= 360
+        while angle_diff < -180:
+            angle_diff += 360
+        
+        # Apply limited turn rate (same as taxi)
+        if abs(angle_diff) > max_turn_per_step:
+            heading += max_turn_per_step if angle_diff > 0 else -max_turn_per_step
+        else:
+            heading = target_heading
+        
+        aircraft_info['heading'] = heading
         
         # Update aircraft triangle position
         angle_rad = math.radians(heading)
@@ -735,6 +908,9 @@ def build_home_screen():
         # Draw nodes and edges on top of the map
         draw_graph(main_canvas)
         
+        # Draw stop bars (always enabled)
+        draw_stop_bars(main_canvas)
+        
     except Exception as e:
         print(f"Error loading map image: {e}")
         placeholder = ctk.CTkLabel(app, text="[Map image not available]", font=("Arial", 16, "bold"), text_color="white")
@@ -777,10 +953,12 @@ def build_home_screen():
     lvp_frame.pack(side="left", padx=20, pady=10)
     
     ctk.CTkLabel(lvp_frame, text="LVP Improvement", font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 10))
-    lvp_stop_bars_var = tk.BooleanVar(value=False)
     lvp_reduced_sep_var = tk.BooleanVar(value=False)
     lvp_adaptive_seq_var = tk.BooleanVar(value=False)
-    ctk.CTkCheckBox(lvp_frame, text="Stop bars", variable=lvp_stop_bars_var).pack(anchor="w", pady=5)
+    lvp_StopBar_sep_var = tk.BooleanVar(value=False)
+    
+    # Stop bars are always enabled independently, checkbox is non-functional
+    ctk.CTkCheckBox(lvp_frame, text="Stop bars", variable=lvp_StopBar_sep_var).pack(anchor="w", pady=5)
     ctk.CTkCheckBox(lvp_frame, text="Reduced separation", variable=lvp_reduced_sep_var).pack(anchor="w", pady=5)
     ctk.CTkCheckBox(lvp_frame, text="Adaptive sequencing", variable=lvp_adaptive_seq_var).pack(anchor="w", pady=5)
 
