@@ -31,18 +31,19 @@ nodes = {
     "AQ": (771, 158), "NQ": (771, 283),
     "AR": (1320, 158), "NR": (1320, 283),
     "AS": (1045, 158), "NS": (1045, 283),
-    "TXY_A1": (1820, 158),"A1_HOLD": (1820, 125), "RWY27_A1": (1820, 70),
+    "TXY_A1": (1820, 158),"A1_HOLD": (1820, 125), "RWY27_A1": (1820, 70), "RWY09_AirBorne": (1920,70),
     "TXY_B1": (1558, 158),"B1_HOLD": (1558, 125), "RWY27_B1": (1558, 70),
     "TXY_C1": (645, 158),"C1_HOLD": (645, 125), "RWY09_C1": (645, 70),
     "TXY_D1": (214, 158),"D1_HOLD": (214, 125), "RWY09_D1": (214, 70),
-    "TXY_E1": (105, 158),"E1_HOLD": (105, 125), "RWY09_E1": (105, 70),
+    "TXY_E1": (105, 158),"E1_HOLD": (105, 125), "RWY09_E1": (105, 70), "RWY27_AirBorne": (0,70),
 }
 
 edges = {
-    "RWY27_A1": ["A1_HOLD","RWY27_B1"],
+    "RWY27_A1": ["A1_HOLD","RWY27_B1","RWY27_AirBorne"],
     "RWY27_B1": ["B1_HOLD","RWY09_C1"],
     "RWY09_C1": ["C1_HOLD","RWY09_D1"],
     "RWY09_D1": ["RWY09_E1","D1_HOLD"],
+    "RWY09_E1": ["RWY09_AirBorne"],
     "E1_HOLD": ["RWY09_E1","TXY_E1"],
     "TXY_D1": ["TXY_E1","D1_HOLD"],
     "TXY_C1": ["TXY_D1","AQ","C1_HOLD"],
@@ -417,6 +418,27 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
             # Reached final destination
             aircraft_info['node'] = destination_node
             aircraft_info['position'] = nodes[destination_node]
+            
+            # Check if we've reached a hold point and should proceed to runway
+            if destination_node in ["A1_HOLD", "E1_HOLD"]:
+                # Determine runway entry point based on hold point
+                if destination_node == "A1_HOLD":
+                    runway_entry = "RWY27_A1"
+                else:  # E1_HOLD
+                    runway_entry = "RWY09_E1"
+                
+                # Continue to runway entry point after brief hold
+                app.after(500, lambda: taxi_aircraft(canvas, aircraft_info, runway_entry))
+            # Check if we've reached a runway entry point and should start takeoff
+            elif destination_node in ["RWY27_A1", "RWY09_E1"]:
+                # Determine the airborne node based on runway
+                if destination_node == "RWY27_A1":
+                    airborne_node = "RWY27_AirBorne"
+                else:  # RWY09_E1
+                    airborne_node = "RWY09_AirBorne"
+                
+                # Start takeoff after a short delay
+                app.after(500, lambda: takeoff_aircraft(canvas, aircraft_info, airborne_node))
             return
         
         # Get current and next node positions
@@ -572,6 +594,111 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
     move_to_next_node()
 
 # ==============================
+# TAKEOFF AIRCRAFT
+def takeoff_aircraft(canvas, aircraft_info, airborne_node):
+    """Animate aircraft taking off from runway to airborne node.
+    
+    Aircraft gradually accelerates and moves towards the airborne node,
+    then disappears and moves to the Airborne status column.
+    """
+    import math
+    
+    # Get starting position (current runway position)
+    start_x, start_y = aircraft_info['position']
+    end_x, end_y = nodes[airborne_node]
+    
+    # Calculate direction and distance
+    dx = end_x - start_x
+    dy = end_y - start_y
+    total_distance = math.hypot(dx, dy)
+    
+    # Calculate heading for takeoff roll
+    heading = math.degrees(math.atan2(dy, dx))
+    aircraft_info['heading'] = heading
+    
+    # Takeoff parameters
+    initial_speed = 5  # Starting speed (pixels per frame)
+    final_speed = 20   # Speed at rotation/liftoff (pixels per frame)
+    acceleration_distance = total_distance * 0.8  # Accelerate for 80% of runway
+    
+    # Total steps based on average speed
+    avg_speed = (initial_speed + final_speed) / 2
+    total_steps = int(total_distance / avg_speed)
+    
+    # Move to Airborne status column at start of takeoff roll
+    move_aircraft_status(aircraft_info['callsign'], 'Airborne')
+    
+    def animate_takeoff(step=0):
+        if step >= total_steps:
+            # Aircraft has left the screen - remove it from canvas
+            canvas.delete(aircraft_info['triangle_id'])
+            canvas.delete(aircraft_info['label_id'])
+            
+            # Update aircraft info
+            aircraft_info['position'] = (end_x, end_y)
+            aircraft_info['node'] = airborne_node
+            
+            return
+        
+        # Calculate progress (0.0 to 1.0)
+        progress = step / total_steps
+        
+        # Calculate current speed with acceleration
+        if progress < (acceleration_distance / total_distance):
+            # Accelerating phase
+            accel_progress = progress / (acceleration_distance / total_distance)
+            current_speed = initial_speed + (final_speed - initial_speed) * accel_progress
+        else:
+            # Constant speed phase
+            current_speed = final_speed
+        
+        # Calculate cumulative distance traveled
+        if step == 0:
+            aircraft_info['takeoff_distance'] = 0.0
+        
+        aircraft_info['takeoff_distance'] += current_speed
+        distance_traveled = aircraft_info['takeoff_distance']
+        
+        # Calculate current position along the path
+        if total_distance > 0:
+            t = min(distance_traveled / total_distance, 1.0)
+        else:
+            t = 1.0
+        
+        curr_x = start_x + dx * t
+        curr_y = start_y + dy * t
+        
+        # Update aircraft triangle position
+        angle_rad = math.radians(heading)
+        size = 12
+        
+        # Define triangle with nose at origin
+        base_points = [
+            (0, 0),              # Nose
+            (-2*size, -size),    # Upper rear
+            (-2*size, size)      # Lower rear
+        ]
+        
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+        
+        rotated_points = []
+        for px, py in base_points:
+            rx = px * cos_a - py * sin_a
+            ry = px * sin_a + py * cos_a
+            rotated_points.extend([curr_x + rx, curr_y + ry])
+        
+        canvas.coords(aircraft_info['triangle_id'], *rotated_points)
+        canvas.coords(aircraft_info['label_id'], curr_x, curr_y - size - 10)
+        
+        aircraft_info['position'] = (curr_x, curr_y)
+        
+        # Schedule next step with shorter delay for faster animation
+        app.after(30, animate_takeoff, step + 1)
+    
+    animate_takeoff()
+
+# ==============================
 # HOME SCREEN DISPLAY
 def build_home_screen():
     """Build the ATC home screen UI matching the provided PNG layout."""
@@ -719,7 +846,7 @@ def build_home_screen():
             runway = runway_var.get()
             final_direction = "right" if runway == "09" else "left"
             
-            # Determine runway target node
+            # Determine hold point target (will continue to runway from there)
             if runway == "27":
                 runway_target = "A1_HOLD"
             else:  # runway == "09"
