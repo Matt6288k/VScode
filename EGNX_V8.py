@@ -31,11 +31,11 @@ nodes = {
     "AQ": (771, 158), "NQ": (771, 283),
     "AR": (1320, 158), "NR": (1320, 283),
     "AS": (1045, 158), "NS": (1045, 283),
-    "TXY_A1": (1820, 158),"A1_HOLD": (1820, 125), "RWY27_A1": (1820, 70), "RWY09_AirBorne": (1920,70),
-    "TXY_B1": (1558, 158),"B1_HOLD": (1558, 125), "RWY27_B1": (1558, 70),
-    "TXY_C1": (645, 158),"C1_HOLD": (645, 125), "RWY09_C1": (645, 70),
-    "TXY_D1": (214, 158),"D1_HOLD": (214, 125), "RWY09_D1": (214, 70),
-    "TXY_E1": (105, 158),"E1_HOLD": (105, 125), "RWY09_E1": (105, 70), "RWY27_AirBorne": (0,70),
+    "TXY_A1": (1820, 158),"A1_HOLD": (1820, 120), "RWY27_A1": (1820, 70), "RWY09_AirBorne": (1920,70),
+    "TXY_B1": (1558, 158),"B1_HOLD": (1558, 120), "RWY27_B1": (1558, 70),
+    "TXY_C1": (645, 158),"C1_HOLD": (645, 120), "RWY09_C1": (645, 70),
+    "TXY_D1": (214, 158),"D1_HOLD": (214, 120), "RWY09_D1": (214, 70),
+    "TXY_E1": (105, 158),"E1_HOLD": (105, 120), "RWY09_E1": (105, 70), "RWY27_AirBorne": (0,70),
 }
 
 edges = {
@@ -191,27 +191,69 @@ active_aircraft = {}
 aircraft_rows = {}
 stop_bars = {}
 stop_bar_draw_ids = {}
-stop_bar_disabled_until = {}  # Track when each stop bar should turn back on
+stop_bar_off_until = {}  # Track when each stop bar should turn back on (time-based)
 runway_protected = True  # Track if runway is protected (stop bars on)
+simulation_speed = 1.0  # Speed multiplier for simulation (1x, 2x, 5x, 10x)
+simulation_speed = 1.0  # Speed multiplier for simulation (1x, 2x, 5x, 10x)
 main_canvas = None  # Global reference to the canvas
 status_columns = {}  # Global reference to status board columns
 aircraft_labels = {}  # Track labels in each status column
+graph_element_ids = []  # Store all graph element IDs for hiding/showing
+graph_visible = True  # Track whether graph is currently visible
+
+# ==============================
+# SPEED CONTROL HELPER
+def adjust_delay(base_delay_ms):
+    """Adjust a delay in milliseconds based on simulation speed multiplier."""
+    return max(1, int(base_delay_ms / simulation_speed))
+
+# ==============================
+# SPEED CONTROL HELPER
+def adjust_delay(base_delay_ms):
+    """Adjust a delay in milliseconds based on simulation speed multiplier."""
+    return max(1, int(base_delay_ms / simulation_speed))
 
 # ==============================
 # GRAPH DRAW FUNCTION
 def draw_graph(canvas):
     """Draw nodes and edges on the canvas."""
+    global graph_element_ids
+    
+    # Clear existing graph element IDs
+    graph_element_ids = []
+    
     # Draw edges (connections) first so they appear under the nodes
     for node, neighbors in edges.items():
         x1, y1 = nodes[node]
         for neighbor in neighbors:
             x2, y2 = nodes[neighbor]
-            canvas.create_line(x1, y1, x2, y2, fill="yellow", width=2, dash=(4,2))
+            line_id = canvas.create_line(x1, y1, x2, y2, fill="yellow", width=2, dash=(4,2))
+            graph_element_ids.append(line_id)
     
     # Draw nodes (circles) on top
     for name, (x, y) in nodes.items():
-        canvas.create_oval(x-3, y-3, x+3, y+3, fill="red")
-        canvas.create_text(x, y-10, text=name, fill="white", font=("Arial", 7, "bold"))
+        oval_id = canvas.create_oval(x-3, y-3, x+3, y+3, fill="red")
+        text_id = canvas.create_text(x, y-10, text=name, fill="white", font=("Arial", 7, "bold"))
+        graph_element_ids.append(oval_id)
+        graph_element_ids.append(text_id)
+
+def toggle_graph_visibility():
+    """Toggle the visibility of nodes and edges."""
+    global graph_visible
+    
+    if not main_canvas:
+        return
+    
+    if graph_visible:
+        # Hide all graph elements
+        for element_id in graph_element_ids:
+            main_canvas.itemconfig(element_id, state='hidden')
+        graph_visible = False
+    else:
+        # Show all graph elements
+        for element_id in graph_element_ids:
+            main_canvas.itemconfig(element_id, state='normal')
+        graph_visible = True
 
 # ==============================
 # STOP BARS
@@ -219,24 +261,19 @@ def draw_graph(canvas):
 # Format: "HOLD_NAME": {"red": [(x1,y1), (x2,y2), ...], "green": [(x1,y1), (x2,y2), ...]}
 STOP_BAR_POSITIONS = {
     "A1_HOLD": {
-        "red": [(1815, 125), (1820, 125), (1825, 125), (1830, 125), (1835, 125), (1840, 125)],  # Add 6 red light positions here: [(x1,y1), (x2,y2), (x3,y3), (x4,y4), (x5,y5), (x6,y6)]
-        "green": []  # Add 4 green light positions here: [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
+        "red": [(1810, 120), (1815, 120), (1820, 120), (1825, 120), (1830, 120), (1835, 120)],  # Add 6 red light positions here: [(x1,y1), (x2,y2), (x3,y3), (x4,y4), (x5,y5), (x6,y6)] 
     },
     "B1_HOLD": {
-        "red": [],
-        "green": []
+        "red": [(1548, 120), (1553, 120), (1558, 120), (1563, 120), (1568, 120)],
     },
     "C1_HOLD": {
-        "red": [],
-        "green": []
+        "red": [(635, 120), (640, 120), (645, 120), (650, 120), (655, 120)],
     },
     "D1_HOLD": {
-        "red": [],
-        "green": []
+        "red": [(204, 120), (209, 120), (214, 120), (219, 120), (224, 120)],
     },
     "E1_HOLD": {
-        "red": [],
-        "green": []
+        "red": [(90, 120), (95, 120), (100, 120), (105, 120), (110, 120), (115, 120)],
     }
 }
 
@@ -244,9 +281,9 @@ def draw_stop_bars(canvas):
     """Draw stop bars at runway hold points using manual pixel coordinates.
     
     Red stop bar lights are always on, and turn off when an aircraft at that hold
-    is cleared to cross (runway is clear). Lights stay off for 3 seconds after crossing.
+    is cleared to cross (runway is clear). Lights turn back on 2 seconds after turning off.
     """
-    global stop_bar_draw_ids, stop_bar_disabled_until
+    global stop_bar_draw_ids, stop_bar_off_until
     import time
     
     # Clear existing stop bars
@@ -257,16 +294,15 @@ def draw_stop_bars(canvas):
     
     current_time = time.time()
     
-    # Check which hold points have aircraft that are cleared to cross
-    cleared_holds = set()
+    # Check which hold points have aircraft that should turn off the stop bar
     for callsign, info in active_aircraft.items():
         node = info.get('node')
         # If aircraft is at a hold point and runway is clear, turn off that stop bar
         if node and node.endswith('_HOLD') and is_runway_clear():
-            cleared_holds.add(node)
-            # Set the timer for when this stop bar should turn back on (1.5 seconds from now)
-            if node not in stop_bar_disabled_until or stop_bar_disabled_until[node] < current_time:
-                stop_bar_disabled_until[node] = current_time + 1.5  # 1.5 second delay
+            # If this hold's stop bar isn't already off, turn it off now and set timer
+            if node not in stop_bar_off_until or current_time >= stop_bar_off_until[node]:
+                stop_bar_duration = 1.2 / simulation_speed  # Adjust duration based on simulation speed
+                stop_bar_off_until[node] = current_time + stop_bar_duration
     
     for hold_name, positions in STOP_BAR_POSITIONS.items():
         if not positions.get("red"):
@@ -274,12 +310,10 @@ def draw_stop_bars(canvas):
             
         items = []
         
-        # Red lights are OFF when:
-        # 1. Aircraft at this hold is cleared, OR
-        # 2. Within the 3-second delay period after crossing
-        # Red lights are ON otherwise (default)
-        is_within_delay_period = hold_name in stop_bar_disabled_until and current_time < stop_bar_disabled_until[hold_name]
-        show_red_lights = (hold_name not in cleared_holds) and (not is_within_delay_period)
+        # Red lights are OFF if we're within the 2-second timer period
+        # Red lights turn back ON after 2 seconds
+        is_off = hold_name in stop_bar_off_until and current_time < stop_bar_off_until[hold_name]
+        show_red_lights = not is_off
         
         # Draw red stop bar lights
         if show_red_lights:
@@ -305,6 +339,13 @@ def update_stop_bars(canvas):
     
     # Redraw all stop bars with current runway status
     draw_stop_bars(canvas)
+
+def continuous_stop_bar_update():
+    """Continuously update stop bars every 100ms for smooth timer-based updates."""
+    if main_canvas:
+        update_stop_bars(main_canvas)
+    # Schedule next update
+    app.after(100, continuous_stop_bar_update)
 
 # ==============================
 # DRAW AIRCRAFT
@@ -426,7 +467,7 @@ def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right
             
             # Start taxi to runway if target provided
             if runway_target:
-                app.after(500, lambda: taxi_aircraft(canvas, aircraft_info, runway_target))
+                app.after(adjust_delay(500), lambda: taxi_aircraft(canvas, aircraft_info, runway_target))
             return
         
         # Calculate current position
@@ -482,7 +523,7 @@ def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right
         aircraft_info['position'] = (curr_x, curr_y)
         
         # Schedule next step
-        app.after(50, animate_step, current_step + 1)
+        app.after(adjust_delay(50), animate_step, current_step + 1)
     
     animate_step()
 
@@ -523,7 +564,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
                     runway_entry = "RWY09_E1"
                 
                 # Continue to runway entry point after brief hold
-                app.after(500, lambda: taxi_aircraft(canvas, aircraft_info, runway_entry))
+                app.after(adjust_delay(500), lambda: taxi_aircraft(canvas, aircraft_info, runway_entry))
             # Check if we've reached a runway entry point and should start takeoff
             elif destination_node in ["RWY27_A1", "RWY09_E1"]:
                 # Determine the airborne node based on runway
@@ -549,7 +590,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
             if not is_runway_clear() or stop_bar_illuminated:
                 # Runway is occupied or stop bar is on, wait and check again
                 aircraft_info['waiting_at_hold'] = True
-                app.after(1000, move_to_next_node)  # Check again in 1 second
+                app.after(adjust_delay(1000), move_to_next_node)  # Check again
                 # Update stop bars in case this aircraft's presence changes the state
                 if main_canvas:
                     update_stop_bars(main_canvas)
@@ -701,7 +742,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
             aircraft_info['rear_position'] = (rear_x, rear_y)  # Track rear for reference
             
             # Schedule next step
-            app.after(50, animate_segment, step + 1)
+            app.after(adjust_delay(50), animate_segment, step + 1)
         
         animate_segment()
     
@@ -783,7 +824,7 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
             
             # Remove from status board after 10 seconds
             callsign = aircraft_info['callsign']
-            app.after(10000, lambda: remove_aircraft_from_status(callsign))
+            app.after(adjust_delay(10000), lambda: remove_aircraft_from_status(callsign))
             
             return
         
@@ -867,7 +908,7 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
         aircraft_info['position'] = (curr_x, curr_y)
         
         # Schedule next step with shorter delay for faster animation
-        app.after(30, animate_takeoff, step + 1)
+        app.after(adjust_delay(30), animate_takeoff, step + 1)
     
     animate_takeoff()
 
@@ -961,6 +1002,9 @@ def build_home_screen():
     ctk.CTkCheckBox(lvp_frame, text="Stop bars", variable=lvp_StopBar_sep_var).pack(anchor="w", pady=5)
     ctk.CTkCheckBox(lvp_frame, text="Reduced separation", variable=lvp_reduced_sep_var).pack(anchor="w", pady=5)
     ctk.CTkCheckBox(lvp_frame, text="Adaptive sequencing", variable=lvp_adaptive_seq_var).pack(anchor="w", pady=5)
+    
+    # Toggle Graph Button
+    ctk.CTkButton(lvp_frame, text="Toggle Nodes/Edges", command=toggle_graph_visibility).pack(anchor="w", pady=(10, 5))
 
     # Center: Movements per hour / Delays in columnar format (matches status board style)
     data_frame = ctk.CTkFrame(controls_main)
@@ -1049,10 +1093,14 @@ def build_home_screen():
             add_aircraft_to_status('TEST001', 'Departures')
             
             # Start pushback after a short delay, with runway target for subsequent taxi
-            app.after(1000, lambda: pushback_aircraft(main_canvas, aircraft_info, "STAND1N", final_direction, runway_target=runway_target))
+            app.after(adjust_delay(1000), lambda: pushback_aircraft(main_canvas, aircraft_info, "STAND1N", final_direction, runway_target=runway_target))
+    
+    # Button panel for run and speed control
+    button_panel = ctk.CTkFrame(controls_main)
+    button_panel.pack(side="right", padx=20, pady=10)
     
     run_btn = ctk.CTkButton(
-        controls_main, 
+        button_panel, 
         text="▶ Run Simulation", 
         font=("Arial", 14, "bold"),
         fg_color="#1e88e5",
@@ -1061,7 +1109,31 @@ def build_home_screen():
         width=200,
         command=run_simulation
     )
-    run_btn.pack(side="right", padx=20, pady=10)
+    run_btn.pack(pady=(0, 10))
+    
+    # Speed control - toggle button that cycles through speeds
+    speed_options = [1.0, 2.0, 5.0, 10.0]
+    speed_index = [0]  # Use list to allow modification in nested function
+    speed_btn_ref = []  # Store reference to button for text updates
+    
+    def cycle_speed():
+        global simulation_speed
+        speed_index[0] = (speed_index[0] + 1) % len(speed_options)
+        simulation_speed = speed_options[speed_index[0]]
+        speed_btn_ref[0].configure(text=f"Speed: {speed_options[speed_index[0]]}x")
+    
+    speed_btn = ctk.CTkButton(
+        button_panel,
+        text="Speed: 1x",
+        font=("Arial", 12, "bold"),
+        fg_color="#4CAF50",
+        hover_color="#45a049",
+        height=40,
+        width=150,
+        command=cycle_speed
+    )
+    speed_btn.pack(pady=(0, 10))
+    speed_btn_ref.append(speed_btn)
 
     # ===== BOTTOM SECTION: Status Board =====
     status_frame = ctk.CTkFrame(app)
@@ -1107,4 +1179,6 @@ if __name__ == "__main__":
         app.state("zoomed")
         # Build the home screen and start the GUI
         build_home_screen()
+        # Start continuous stop bar updates
+        continuous_stop_bar_update()
         app.mainloop()
