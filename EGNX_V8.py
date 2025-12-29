@@ -280,8 +280,9 @@ STOP_BAR_POSITIONS = {
 def draw_stop_bars(canvas):
     """Draw stop bars at runway hold points using manual pixel coordinates.
     
-    Red stop bar lights are always on, and turn off when an aircraft at that hold
-    is cleared to cross (runway is clear). Lights turn back on 2 seconds after turning off.
+    Red stop bar lights are always on, and turn off when a DEPARTING aircraft at that hold
+    is cleared to cross (runway is clear). Landing aircraft do NOT affect stop bar state.
+    Lights turn back on 2 seconds after turning off.
     """
     global stop_bar_draw_ids, stop_bar_off_until
     import time
@@ -294,11 +295,17 @@ def draw_stop_bars(canvas):
     
     current_time = time.time()
     
-    # Check which hold points have aircraft that should turn off the stop bar
+    # Check which hold points have DEPARTING aircraft that should turn off the stop bar
+    # Landing aircraft (with ignore_stop_bars flag) should NOT affect stop bars
     for callsign, info in active_aircraft.items():
         node = info.get('node')
-        # If aircraft is at a hold point and runway is clear, turn off that stop bar
-        if node and node.endswith('_HOLD') and is_runway_clear():
+        # Only turn off stop bar if:
+        # 1. Aircraft is at a hold point
+        # 2. Runway is clear
+        # 3. Aircraft is NOT a landing aircraft (doesn't have ignore_stop_bars flag)
+        is_landing_aircraft = info.get('ignore_stop_bars', False)
+        
+        if node and node.endswith('_HOLD') and is_runway_clear() and not is_landing_aircraft:
             # If this hold's stop bar isn't already off, turn it off now and set timer
             if node not in stop_bar_off_until or current_time >= stop_bar_off_until[node]:
                 stop_bar_duration = 1.2 / simulation_speed  # Adjust duration based on simulation speed
@@ -913,6 +920,493 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
     animate_takeoff()
 
 # ==============================
+# LANDING AIRCRAFT
+def landing_aircraft(canvas, aircraft_info, runway_exit_node):
+    """Animate aircraft landing from airborne node to runway exit with smooth deceleration and turning.
+    
+    Aircraft starts fast, gradually slows to taxi speed after passing runway threshold, 
+    and uses proper turning logic when exiting runway.
+    After exiting, it will taxi to an available stand, ignoring the exit point stop bar.
+    """
+    import math
+    
+    # Determine the full landing route (airborne → runway → runway exit → taxiway)
+    # Based on runway exit node, determine the taxiway node and full runway path
+    if runway_exit_node == "RWY09_C1":
+        # Landing on runway 27 (from east to west), exiting at C
+        # Must follow the runway centerline through all intermediate nodes
+        route = ["RWY09_AirBorne", "RWY27_A1", "RWY27_B1", "RWY09_C1", "C1_HOLD", "TXY_C1"]
+        deceleration_start = "RWY27_A1"  # Start slowing after this node
+    else:  # runway_exit_node == "RWY27_B1"
+        # Landing on runway 09 (from west to east), exiting at B
+        # Must follow the runway centerline through all intermediate nodes
+        route = ["RWY27_AirBorne", "RWY09_E1", "RWY09_D1", "RWY09_C1", "RWY27_B1", "B1_HOLD", "TXY_B1"]
+        deceleration_start = "RWY09_E1"  # Start slowing after this node
+    
+    aircraft_info['route'] = route
+    aircraft_info['route_index'] = 0
+    aircraft_info['deceleration_start'] = deceleration_start
+    
+    # Pre-calculate total deceleration distance for smooth global speed control
+    try:
+        # Decelerate from spawn (index 0) to the runway exit node
+        deceleration_start_idx = 0
+        runway_exit_idx = route.index(runway_exit_node)
+        
+        # Calculate total distance from deceleration start to runway exit
+        decel_total_distance = 0
+        for i in range(deceleration_start_idx, runway_exit_idx + 1):
+            node_a = route[i]
+            node_b = route[i + 1] if i + 1 < len(route) else route[i]
+            decel_total_distance += math.hypot(nodes[node_b][0] - nodes[node_a][0], 
+                                               nodes[node_b][1] - nodes[node_a][1])
+        
+        aircraft_info['decel_total_distance'] = decel_total_distance
+        aircraft_info['decel_distance_traveled'] = 0.0
+        aircraft_info['deceleration_start_idx'] = deceleration_start_idx
+        aircraft_info['runway_exit_idx'] = runway_exit_idx
+    except (ValueError, KeyError):
+        aircraft_info['decel_total_distance'] = 1000
+        aircraft_info['decel_distance_traveled'] = 0.0
+        aircraft_info['deceleration_start_idx'] = 0
+        aircraft_info['runway_exit_idx'] = len(route) - 1
+    
+    # Track status changes
+    moved_to_runway = [False]
+    
+    def move_through_route():
+        """Move aircraft through each segment of the landing route."""
+        route_idx = aircraft_info.get('route_index', 0)
+        
+        if route_idx >= len(route) - 1:
+            # Completed landing sequence, now taxi to stand
+            aircraft_info['node'] = route[-1]
+            aircraft_info['position'] = nodes[route[-1]]
+            
+            # Move to Taxiing status
+            move_aircraft_status(aircraft_info['callsign'], 'Taxiing')
+            
+            # Find an available stand
+            available_stand = find_available_stand()
+            if available_stand:
+                # Taxi to the available stand, ignoring stop bars on exit
+                aircraft_info['ignore_stop_bars'] = True
+                app.after(adjust_delay(500), lambda: taxi_to_stand_after_landing(canvas, aircraft_info, available_stand))
+            
+            return
+        
+        # Get current and next node
+        current_node = route[route_idx]
+        next_node = route[route_idx + 1]
+        
+        start_x, start_y = nodes[current_node]
+        end_x, end_y = nodes[next_node]
+        
+        # Calculate distance and direction
+        dx = end_x - start_x
+        dy = end_y - start_y
+        distance = math.hypot(dx, dy)
+        
+        # Calculate target angle for this segment
+        target_angle = math.degrees(math.atan2(dy, dx))
+        
+        # Initialize heading if not set
+        if 'heading' not in aircraft_info:
+            aircraft_info['heading'] = target_angle
+        
+        # Determine speed based on position in landing sequence
+        # Decelerate smoothly from spawn to runway exit: 20 → 5 px/frame
+        deceleration_start_idx = aircraft_info.get('deceleration_start_idx', 0)
+        runway_exit_idx = aircraft_info.get('runway_exit_idx', len(route) - 1)
+        
+        # Decelerate until runway exit; after exit maintain taxi speed
+        is_decelerating = route_idx <= runway_exit_idx
+        
+        # Calculate number of steps
+        avg_speed = (20 + 5) / 2  # Average between landing and taxi speed
+        steps = max(int(distance / avg_speed), 1)
+        
+        # Calculate look-ahead angle for smooth turning
+        next_segment_angle = target_angle
+        has_next_segment = False
+        if route_idx + 2 < len(route):
+            next_next_node = route[route_idx + 2]
+            next_end_x, next_end_y = nodes[next_next_node]
+            next_segment_angle = math.degrees(math.atan2(next_end_y - end_y, next_end_x - end_x))
+            has_next_segment = True
+        
+        # Turn parameters (same as taxi)
+        turn_zone_distance = 20  # Start turning within this distance of node
+        max_turn_per_step = 8.0  # Degrees per step
+        corner_cut_radius = 10   # Pixels to cut corner
+        
+        def animate_segment(step=0):
+            # Initialize segment position and remaining distance on first step
+            if step == 0:
+                aircraft_info['segment_x'] = start_x
+                aircraft_info['segment_y'] = start_y
+                aircraft_info['segment_remaining_distance'] = distance
+            
+            # Check if we've reached the destination node (distance-based)
+            current_x = aircraft_info.get('segment_x', start_x)
+            current_y = aircraft_info.get('segment_y', start_y)
+            dist_remaining = math.hypot(end_x - current_x, end_y - current_y)
+            remaining = aircraft_info.get('segment_remaining_distance', dist_remaining)
+            
+            if remaining <= 1.0 or dist_remaining <= 1.0:
+                # Reached next node - snap to exact position
+                aircraft_info['route_index'] = route_idx + 1
+                aircraft_info['node'] = next_node
+                aircraft_info['position'] = nodes[next_node]
+                aircraft_info['segment_x'] = end_x
+                aircraft_info['segment_y'] = end_y
+                # Continue to next segment
+                move_through_route()
+                return
+            
+            # Calculate progress through this segment
+            progress = step / steps
+            
+            # Move to Runway status column at start of landing (first segment)
+            if route_idx == 0 and progress >= 0.1 and not moved_to_runway[0]:
+                move_aircraft_status(aircraft_info['callsign'], 'Runway')
+                moved_to_runway[0] = True
+            
+            # Calculate current speed with smooth deceleration
+            if is_decelerating:
+                # Use pre-calculated total deceleration distance
+                decel_total_distance = aircraft_info.get('decel_total_distance', 1000)
+                decel_distance_traveled = aircraft_info.get('decel_distance_traveled', 0.0)
+                
+                # Progress across decel zone (0 → 1)
+                decel_progress = min(1.0, decel_distance_traveled / max(decel_total_distance, 1))
+                
+                # Cubic easing for smooth deceleration: 20 → 5 px/frame
+                ease = decel_progress * decel_progress * decel_progress
+                current_speed = 20 - (15 * ease)
+            else:
+                # Constant taxi speed after runway exit
+                current_speed = 5
+            
+            # Move along segment by actual distance this frame
+            if distance > 0:
+                ux = dx / distance
+                uy = dy / distance
+            else:
+                ux, uy = 0.0, 0.0
+            
+            remaining = aircraft_info.get('segment_remaining_distance', distance)
+            move_dist = min(current_speed, remaining)
+            step_x = ux * move_dist
+            step_y = uy * move_dist
+            
+            # Update deceleration tracker by actual movement
+            if is_decelerating:
+                decel_distance_traveled = aircraft_info.get('decel_distance_traveled', 0.0)
+                decel_distance_traveled += move_dist
+                aircraft_info['decel_distance_traveled'] = decel_distance_traveled
+            
+            aircraft_info['segment_x'] += step_x
+            aircraft_info['segment_y'] += step_y
+            aircraft_info['segment_remaining_distance'] = max(0.0, remaining - move_dist)
+            
+            base_x = aircraft_info['segment_x']
+            base_y = aircraft_info['segment_y']
+            
+            # Calculate distance to next node for turn zone detection
+            dist_to_next_node = math.hypot(end_x - base_x, end_y - base_y)
+            
+            # Apply corner cutting if approaching a turn
+            curr_x = base_x
+            curr_y = base_y
+            
+            if has_next_segment and dist_to_next_node <= turn_zone_distance:
+                # Calculate angle difference to next segment
+                angle_diff_to_next = next_segment_angle - target_angle
+                while angle_diff_to_next > 180:
+                    angle_diff_to_next -= 360
+                while angle_diff_to_next < -180:
+                    angle_diff_to_next += 360
+                
+                if abs(angle_diff_to_next) > 5:
+                    # Smooth corner cutting
+                    linear_factor = 1.0 - (dist_to_next_node / turn_zone_distance)
+                    cut_factor = linear_factor * linear_factor * linear_factor
+                    
+                    bisector_angle = target_angle + (angle_diff_to_next * 0.5)
+                    bisector_rad = math.radians(bisector_angle)
+                    
+                    offset = corner_cut_radius * cut_factor
+                    curr_x = base_x + offset * math.cos(bisector_rad)
+                    curr_y = base_y + offset * math.sin(bisector_rad)
+            
+            # Determine which angle to turn toward
+            if has_next_segment and dist_to_next_node <= turn_zone_distance:
+                angle_diff_to_next = next_segment_angle - target_angle
+                while angle_diff_to_next > 180:
+                    angle_diff_to_next -= 360
+                while angle_diff_to_next < -180:
+                    angle_diff_to_next += 360
+                
+                if abs(angle_diff_to_next) > 5:
+                    turn_target = next_segment_angle
+                else:
+                    turn_target = target_angle
+            else:
+                turn_target = target_angle
+            
+            # Gradually adjust heading with limited turn rate
+            heading = aircraft_info['heading']
+            angle_diff = turn_target - heading
+            
+            while angle_diff > 180:
+                angle_diff -= 360
+            while angle_diff < -180:
+                angle_diff += 360
+            
+            if abs(angle_diff) > max_turn_per_step:
+                heading += max_turn_per_step if angle_diff > 0 else -max_turn_per_step
+            else:
+                heading = turn_target
+            
+            aircraft_info['heading'] = heading
+            
+            # Update aircraft triangle
+            angle_rad = math.radians(heading)
+            size = 12
+            
+            base_points = [
+                (0, 0),
+                (-2*size, -size),
+                (-2*size, size)
+            ]
+            
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+            
+            rotated_points = []
+            for px, py in base_points:
+                rx = px * cos_a - py * sin_a
+                ry = px * sin_a + py * cos_a
+                rotated_points.extend([curr_x + rx, curr_y + ry])
+            
+            canvas.coords(aircraft_info['triangle_id'], *rotated_points)
+            canvas.coords(aircraft_info['label_id'], curr_x, curr_y - size - 10)
+            
+            aircraft_info['position'] = (curr_x, curr_y)
+            
+            # Schedule next step
+            app.after(adjust_delay(30), animate_segment, step + 1)
+        
+        animate_segment()
+    
+    # Start moving through the route
+    move_through_route()
+
+def find_available_stand():
+    """Find the first available stand (not occupied by another aircraft)."""
+    stands = ["STAND1a", "STAND2a", "STAND3a", "STAND4a", "STAND5a", "STAND6a", "STAND7a", "STAND8a"]
+    
+    # Check which stands are currently occupied
+    occupied_stands = set()
+    for callsign, info in active_aircraft.items():
+        node = info.get('node', '')
+        if node in stands:
+            occupied_stands.add(node)
+    
+    # Find first available stand
+    for stand in stands:
+        if stand not in occupied_stands:
+            return stand
+    
+    # Default to STAND1a if all occupied
+    return "STAND1a"
+
+def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
+    """Special taxi function for landing aircraft that ignores stop bars.
+    
+    This is a modified version of taxi_aircraft that doesn't check stop bars
+    when exiting the runway.
+    """
+    import math
+    
+    # Get current node from aircraft info
+    current_node = aircraft_info.get('node', '')
+    
+    # Find path using dijkstra
+    route = dijkstra(current_node, destination_stand)
+    
+    if not route:
+        print(f"No route found from {current_node} to {destination_stand}")
+        return
+    
+    aircraft_info['route'] = route
+    aircraft_info['route_index'] = 0
+    
+    def move_to_next_node():
+        """Move aircraft to the next node in the route."""
+        route_idx = aircraft_info.get('route_index', 0)
+        
+        if route_idx >= len(route) - 1:
+            # Reached final destination (stand)
+            aircraft_info['node'] = destination_stand
+            aircraft_info['position'] = nodes[destination_stand]
+            
+            # Move to Arrivals status
+            move_aircraft_status(aircraft_info['callsign'], 'Arrivals')
+            
+            # Clear the ignore_stop_bars flag
+            aircraft_info['ignore_stop_bars'] = False
+            
+            return
+        
+        # Get current and next node positions
+        current_node = route[route_idx]
+        next_node = route[route_idx + 1]
+        
+        # For landing aircraft, ignore stop bars for the first few nodes after runway exit
+        # This allows them to taxi straight through the exit point stop bar
+        should_ignore_stopbar = aircraft_info.get('ignore_stop_bars', False) and route_idx < 3
+        
+        # Check if we're about to pass through a HOLD node (departing from it)
+        # Only check if we're not ignoring stop bars
+        if current_node.endswith('_HOLD') and not should_ignore_stopbar:
+            # Check if stop bar at this hold point is illuminated (red lights on)
+            stop_bar_illuminated = current_node in stop_bar_draw_ids and len(stop_bar_draw_ids.get(current_node, [])) > 0
+            
+            if not is_runway_clear() or stop_bar_illuminated:
+                # Runway is occupied or stop bar is on, wait and check again
+                aircraft_info['waiting_at_hold'] = True
+                app.after(adjust_delay(1000), move_to_next_node)  # Check again
+                return
+        
+        start_x, start_y = nodes[current_node]
+        end_x, end_y = nodes[next_node]
+        
+        # Calculate distance and steps
+        distance = math.hypot(end_x - start_x, end_y - start_y)
+        steps = max(int(distance / 5), 1)  # speed = 5
+        step_x = (end_x - start_x) / steps
+        step_y = (end_y - start_y) / steps
+        
+        # Calculate target angle for this segment
+        target_angle = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
+        
+        # Get current heading from aircraft info (or initialize to target angle)
+        if 'heading' not in aircraft_info:
+            aircraft_info['heading'] = target_angle
+        
+        current_heading = aircraft_info['heading']
+        
+        # Calculate look-ahead angle for next segment if it exists
+        next_segment_angle = target_angle
+        has_next_segment = False
+        if route_idx + 2 < len(route):
+            next_next_node = route[route_idx + 2]
+            next_end_x, next_end_y = nodes[next_next_node]
+            next_segment_angle = math.degrees(math.atan2(next_end_y - end_y, next_end_x - end_x))
+            has_next_segment = True
+        
+        # Turn parameters
+        turn_zone_distance = 10
+        max_turn_per_step = 8.0
+        wheelbase = 40
+        corner_cut_radius = 10
+        
+        def animate_segment(step=0):
+            if step >= steps:
+                # Reached next node, move to the next segment
+                aircraft_info['route_index'] = route_idx + 1
+                aircraft_info['node'] = next_node
+                aircraft_info['position'] = nodes[next_node]
+                move_to_next_node()
+                return
+            
+            # Calculate base position on straight line
+            base_x = start_x + (step_x * step)
+            base_y = start_y + (step_y * step)
+            
+            # Calculate distance to next node
+            dist_to_next_node = math.hypot(end_x - base_x, end_y - base_y)
+            
+            # Calculate angle difference to next segment
+            angle_diff_to_next = 0
+            if has_next_segment:
+                angle_diff_to_next = next_segment_angle - target_angle
+                while angle_diff_to_next > 180:
+                    angle_diff_to_next -= 360
+                while angle_diff_to_next < -180:
+                    angle_diff_to_next += 360
+            
+            # Apply smooth corner cutting
+            curr_x = base_x
+            curr_y = base_y
+            
+            if has_next_segment and dist_to_next_node <= turn_zone_distance and abs(angle_diff_to_next) > 5:
+                linear_factor = 1.0 - (dist_to_next_node / turn_zone_distance)
+                cut_factor = linear_factor * linear_factor * linear_factor
+                
+                bisector_angle = target_angle + (angle_diff_to_next * 0.5)
+                bisector_rad = math.radians(bisector_angle)
+                
+                offset = corner_cut_radius * cut_factor
+                curr_x = base_x + offset * math.cos(bisector_rad)
+                curr_y = base_y + offset * math.sin(bisector_rad)
+            
+            # Determine turn target
+            if dist_to_next_node <= turn_zone_distance and has_next_segment and abs(angle_diff_to_next) > 5:
+                turn_target = next_segment_angle
+            else:
+                turn_target = target_angle
+            
+            # Adjust heading
+            heading = aircraft_info['heading']
+            angle_diff = turn_target - heading
+            
+            while angle_diff > 180:
+                angle_diff -= 360
+            while angle_diff < -180:
+                angle_diff += 360
+            
+            if abs(angle_diff) > max_turn_per_step:
+                heading += max_turn_per_step if angle_diff > 0 else -max_turn_per_step
+            else:
+                heading = turn_target
+            
+            aircraft_info['heading'] = heading
+            
+            # Update aircraft triangle
+            angle_rad = math.radians(heading)
+            size = 12
+            
+            base_points = [
+                (0, 0),
+                (-2*size, -size),
+                (-2*size, size)
+            ]
+            
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+            
+            rotated_points = []
+            for px, py in base_points:
+                rx = px * cos_a - py * sin_a
+                ry = px * sin_a + py * cos_a
+                rotated_points.extend([curr_x + rx, curr_y + ry])
+            
+            canvas.coords(aircraft_info['triangle_id'], *rotated_points)
+            canvas.coords(aircraft_info['label_id'], curr_x, curr_y - size - 10)
+            
+            aircraft_info['position'] = (curr_x, curr_y)
+            
+            # Schedule next step
+            app.after(adjust_delay(50), animate_segment, step + 1)
+        
+        animate_segment()
+    
+    move_to_next_node()
+
+# ==============================
 # HOME SCREEN DISPLAY
 def build_home_screen():
     """Build the ATC home screen UI matching the provided PNG layout."""
@@ -1095,6 +1589,51 @@ def build_home_screen():
             # Start pushback after a short delay, with runway target for subsequent taxi
             app.after(adjust_delay(1000), lambda: pushback_aircraft(main_canvas, aircraft_info, "STAND1N", final_direction, runway_target=runway_target))
     
+    def spawn_landing_aircraft():
+        """Spawn a landing aircraft at the appropriate airborne node based on runway direction."""
+        if not main_canvas:
+            return
+        
+        # Get runway direction
+        runway = runway_var.get()
+        
+        # Generate unique callsign
+        import random
+        callsign = f"ARR{random.randint(100, 999)}"
+        
+        # Determine spawn node and exit node based on runway
+        if runway == "27":
+            # Landing on runway 27 (from east to west)
+            spawn_node = "RWY09_AirBorne"  # Spawn from the east
+            runway_exit = "RWY09_C1"  # Exit via C nodes
+            direction = "left"  # Aircraft pointing west
+        else:  # runway == "09"
+            # Landing on runway 09 (from west to east)
+            spawn_node = "RWY27_AirBorne"  # Spawn from the west
+            runway_exit = "RWY27_B1"  # Exit via B nodes
+            direction = "right"  # Aircraft pointing east
+        
+        # Create aircraft at spawn node
+        x, y = nodes[spawn_node]
+        triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, direction)
+        
+        # Store aircraft information
+        aircraft_info = {
+            'callsign': callsign,
+            'position': (x, y),
+            'node': spawn_node,
+            'triangle_id': triangle_id,
+            'label_id': label_id,
+            'direction': direction
+        }
+        active_aircraft[callsign] = aircraft_info
+        
+        # Add to Arrivals column initially
+        add_aircraft_to_status(callsign, 'Arrivals')
+        
+        # Start landing sequence after a short delay
+        app.after(adjust_delay(500), lambda: landing_aircraft(main_canvas, aircraft_info, runway_exit))
+    
     # Button panel for run and speed control
     button_panel = ctk.CTkFrame(controls_main)
     button_panel.pack(side="right", padx=20, pady=10)
@@ -1105,11 +1644,24 @@ def build_home_screen():
         font=("Arial", 14, "bold"),
         fg_color="#1e88e5",
         hover_color="#1565c0",
-        height=80,
+        height=60,
         width=200,
         command=run_simulation
     )
     run_btn.pack(pady=(0, 10))
+    
+    # Add Landing Aircraft button
+    landing_btn = ctk.CTkButton(
+        button_panel,
+        text="✈ Spawn Landing Aircraft",
+        font=("Arial", 12, "bold"),
+        fg_color="#ff9800",
+        hover_color="#f57c00",
+        height=50,
+        width=200,
+        command=spawn_landing_aircraft
+    )
+    landing_btn.pack(pady=(0, 10))
     
     # Speed control - toggle button that cycles through speeds
     speed_options = [1.0, 2.0, 5.0, 10.0]
