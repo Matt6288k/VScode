@@ -991,7 +991,7 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
             if available_stand:
                 # Taxi to the available stand, ignoring stop bars on exit
                 aircraft_info['ignore_stop_bars'] = True
-                app.after(adjust_delay(500), lambda: taxi_to_stand_after_landing(canvas, aircraft_info, available_stand))
+                app.after(adjust_delay(0), lambda: taxi_to_stand_after_landing(canvas, aircraft_info, available_stand))
             
             return
         
@@ -1078,8 +1078,9 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 decel_total_distance = aircraft_info.get('decel_total_distance', 1000)
                 decel_distance_traveled = aircraft_info.get('decel_distance_traveled', 0.0)
                 
-                # Progress across decel zone (0 → 1)
-                decel_progress = min(1.0, decel_distance_traveled / max(decel_total_distance, 1))
+                # Complete deceleration at 70% of the distance so aircraft reaches taxi speed before exit
+                # Progress across decel zone (0 → 1), but reaches 1.0 at 70% of total distance
+                decel_progress = min(1.0, decel_distance_traveled / max(decel_total_distance * 0.7, 1))
                 
                 # Cubic easing for smooth deceleration: 20 → 5 px/frame
                 ease = decel_progress * decel_progress * decel_progress
