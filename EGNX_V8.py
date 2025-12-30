@@ -986,12 +986,18 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
             # Move to Taxiing status
             move_aircraft_status(aircraft_info['callsign'], 'Taxiing')
             
-            # Find an available stand
-            available_stand = find_available_stand()
-            if available_stand:
-                # Taxi to the available stand, ignoring stop bars on exit
+            # Use the reserved target stand (set when aircraft spawned)
+            target_stand = aircraft_info.get('target_stand')
+            if target_stand:
+                # Taxi to the reserved stand, ignoring stop bars on exit
                 aircraft_info['ignore_stop_bars'] = True
-                app.after(adjust_delay(0), lambda: taxi_to_stand_after_landing(canvas, aircraft_info, available_stand))
+                app.after(adjust_delay(0), lambda: taxi_to_stand_after_landing(canvas, aircraft_info, target_stand))
+            else:
+                # Fallback: find any available stand (shouldn't happen but just in case)
+                available_stand = find_available_stand()
+                if available_stand:
+                    aircraft_info['ignore_stop_bars'] = True
+                    app.after(adjust_delay(0), lambda: taxi_to_stand_after_landing(canvas, aircraft_info, available_stand))
             
             return
         
@@ -1204,24 +1210,40 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
     # Start moving through the route
     move_through_route()
 
+def is_stand_available(stand_name):
+    """Check if a specific stand is available (not occupied or reserved by another aircraft)."""
+    for callsign, info in active_aircraft.items():
+        # Check if aircraft is physically at the stand
+        if info.get('node', '') == stand_name:
+            return False
+        # Check if stand is reserved as target for a landing aircraft
+        if info.get('target_stand', '') == stand_name:
+            return False
+    return True
+
 def find_available_stand():
-    """Find the first available stand (not occupied by another aircraft)."""
+    """Find the first available stand (not occupied or reserved by another aircraft)."""
     stands = ["STAND1a", "STAND2a", "STAND3a", "STAND4a", "STAND5a", "STAND6a", "STAND7a", "STAND8a"]
     
-    # Check which stands are currently occupied
+    # Check which stands are currently occupied or reserved
     occupied_stands = set()
     for callsign, info in active_aircraft.items():
+        # Check physical occupancy
         node = info.get('node', '')
         if node in stands:
             occupied_stands.add(node)
+        # Check reservations (target stands for landing aircraft)
+        target = info.get('target_stand', '')
+        if target in stands:
+            occupied_stands.add(target)
     
     # Find first available stand
     for stand in stands:
         if stand not in occupied_stands:
             return stand
     
-    # Default to STAND1a if all occupied
-    return "STAND1a"
+    # Return None if all stands occupied
+    return None
 
 def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
     """Special taxi function for landing aircraft that ignores stop bars.
@@ -1258,6 +1280,10 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
             
             # Clear the ignore_stop_bars flag
             aircraft_info['ignore_stop_bars'] = False
+            
+            # Clear the target stand reservation now that we've arrived
+            if 'target_stand' in aircraft_info:
+                del aircraft_info['target_stand']
             
             return
         
@@ -1547,6 +1573,11 @@ def build_home_screen():
     def run_simulation():
         """Create an aircraft at STAND1a when simulation starts and pushback to STAND1N."""
         if main_canvas and "STAND1a" in nodes:
+            # Check if STAND1a is available before spawning
+            if not is_stand_available("STAND1a"):
+                print("Cannot spawn departing aircraft - STAND1a is occupied")
+                return
+            
             # Clear all existing aircraft from canvas
             for callsign, ac_info in active_aircraft.items():
                 if 'triangle_id' in ac_info and ac_info['triangle_id']:
@@ -1595,6 +1626,12 @@ def build_home_screen():
         if not main_canvas:
             return
         
+        # Check if there's an available stand for the arriving aircraft
+        available_stand = find_available_stand()
+        if available_stand is None:
+            print("Cannot spawn landing aircraft - no available stands")
+            return
+        
         # Get runway direction
         runway = runway_var.get()
         
@@ -1618,14 +1655,15 @@ def build_home_screen():
         x, y = nodes[spawn_node]
         triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, direction)
         
-        # Store aircraft information
+        # Store aircraft information with reserved target stand
         aircraft_info = {
             'callsign': callsign,
             'position': (x, y),
             'node': spawn_node,
             'triangle_id': triangle_id,
             'label_id': label_id,
-            'direction': direction
+            'direction': direction,
+            'target_stand': available_stand  # Reserve this stand for this aircraft
         }
         active_aircraft[callsign] = aircraft_info
         
