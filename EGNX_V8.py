@@ -200,6 +200,9 @@ status_columns = {}  # Global reference to status board columns
 aircraft_labels = {}  # Track labels in each status column
 graph_element_ids = []  # Store all graph element IDs for hiding/showing
 graph_visible = True  # Track whether graph is currently visible
+simulation_running = False
+activity_job_id = None
+schedule_turnaround_cb = None
 
 # ==============================
 # SPEED CONTROL HELPER
@@ -520,6 +523,10 @@ def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right
             ry = px * sin_a + py * cos_a
             # Translate to current position
             rotated_points.extend([curr_x + rx, curr_y + ry])
+
+        if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
+            app.after(adjust_delay(200), animate_step, current_step)
+            return
         
         canvas.coords(aircraft_info['triangle_id'], *rotated_points)
         
@@ -741,6 +748,10 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
                 rx = px * cos_a - py * sin_a
                 ry = px * sin_a + py * cos_a
                 rotated_points.extend([curr_x + rx, curr_y + ry])
+
+            if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
+                app.after(adjust_delay(200), animate_segment, step)
+                return
             
             canvas.coords(aircraft_info['triangle_id'], *rotated_points)
             canvas.coords(aircraft_info['label_id'], curr_x, curr_y - size - 10)
@@ -1196,6 +1207,10 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 rx = px * cos_a - py * sin_a
                 ry = px * sin_a + py * cos_a
                 rotated_points.extend([curr_x + rx, curr_y + ry])
+
+            if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
+                app.after(adjust_delay(200), animate_segment, step)
+                return
             
             canvas.coords(aircraft_info['triangle_id'], *rotated_points)
             canvas.coords(aircraft_info['label_id'], curr_x, curr_y - size - 10)
@@ -1245,6 +1260,31 @@ def find_available_stand():
     # Return None if all stands occupied
     return None
 
+def find_available_stands():
+    """Return a list of available stands (not occupied or reserved)."""
+    stands = ["STAND1a", "STAND2a", "STAND3a", "STAND4a", "STAND5a", "STAND6a", "STAND7a", "STAND8a"]
+    occupied_stands = set()
+    for callsign, info in active_aircraft.items():
+        node = info.get('node', '')
+        if node in stands:
+            occupied_stands.add(node)
+        target = info.get('target_stand', '')
+        if target in stands:
+            occupied_stands.add(target)
+    return [stand for stand in stands if stand not in occupied_stands]
+
+def is_safe_to_move(callsign, next_x, next_y, min_distance=28):
+    """Check that the next position keeps a minimum separation from other aircraft."""
+    for other_callsign, info in active_aircraft.items():
+        if other_callsign == callsign:
+            continue
+        other_pos = info.get('position')
+        if not other_pos:
+            continue
+        if math.hypot(other_pos[0] - next_x, other_pos[1] - next_y) < min_distance:
+            return False
+    return True
+
 def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
     """Special taxi function for landing aircraft that ignores stop bars.
     
@@ -1284,6 +1324,9 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
             # Clear the target stand reservation now that we've arrived
             if 'target_stand' in aircraft_info:
                 del aircraft_info['target_stand']
+
+            if schedule_turnaround_cb:
+                schedule_turnaround_cb(aircraft_info, destination_stand)
             
             return
         
@@ -1420,6 +1463,10 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
                 rx = px * cos_a - py * sin_a
                 ry = px * sin_a + py * cos_a
                 rotated_points.extend([curr_x + rx, curr_y + ry])
+
+            if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
+                app.after(adjust_delay(200), animate_segment, step)
+                return
             
             canvas.coords(aircraft_info['triangle_id'], *rotated_points)
             canvas.coords(aircraft_info['label_id'], curr_x, curr_y - size - 10)
@@ -1569,93 +1616,150 @@ def build_home_screen():
             anchor="center",
         ).pack(fill="both", expand=True, padx=4, pady=4)
 
-    # Right: Run Simulation button
-    def run_simulation():
-        """Create an aircraft at STAND1a when simulation starts and pushback to STAND1N."""
-        if main_canvas and "STAND1a" in nodes:
-            # Check if STAND1a is available before spawning
-            if not is_stand_available("STAND1a"):
-                print("Cannot spawn departing aircraft - STAND1a is occupied")
+    # Right: Play button for general activity
+    def clear_existing_aircraft():
+        if not main_canvas:
+            return
+        for callsign, ac_info in list(active_aircraft.items()):
+            turnaround_job_id = ac_info.get('turnaround_job_id')
+            if turnaround_job_id:
+                try:
+                    app.after_cancel(turnaround_job_id)
+                except Exception:
+                    pass
+            if 'triangle_id' in ac_info and ac_info['triangle_id']:
+                main_canvas.delete(ac_info['triangle_id'])
+            if 'label_id' in ac_info and ac_info['label_id']:
+                main_canvas.delete(ac_info['label_id'])
+            remove_aircraft_from_status(callsign)
+        active_aircraft.clear()
+
+    def generate_unique_callsign(prefix=None):
+        import random
+
+        def make_suffix():
+            pattern = random.choice(["NNN", "NLL", "NNLL"])
+            if pattern == "NNN":
+                return f"{random.randint(100, 999)}"
+            if pattern == "NLL":
+                return f"{random.randint(1, 9)}{random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ')}{random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ')}"
+            return f"{random.randint(10, 99)}{random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ')}{random.choice('ABCDEFGHIJKLMNOPQRSTUVWXYZ')}"
+
+        allowed_prefixes = ["RYR", "EZY", "EXS", "WIZZ"]
+        chosen_prefix = random.choice(allowed_prefixes)
+
+        for _ in range(50):
+            callsign = f"{chosen_prefix}{make_suffix()}"
+            if callsign not in active_aircraft:
+                return callsign
+        return f"{chosen_prefix}{make_suffix()}"
+
+    def get_turnaround_delay_ms():
+        import random
+        rate = tfr_var.get()
+        if rate == "High":
+            return random.randint(15000, 30000)
+        if rate == "Medium":
+            return random.randint(20000, 40000)
+        return random.randint(30000, 60000)
+
+    def start_departure_from_stand(aircraft_info, stand_node):
+        """Convert a parked aircraft into a departure and start pushback."""
+        if not main_canvas:
+            return
+
+        callsign = aircraft_info.get('callsign')
+        if not callsign or callsign not in active_aircraft:
+            return
+
+        if aircraft_info.get('node') != stand_node:
+            return
+
+        stand_n_node = f"{stand_node[:-1]}N"
+
+        runway = runway_var.get()
+        final_direction = "right" if runway == "09" else "left"
+        runway_target = "A1_HOLD" if runway == "27" else "E1_HOLD"
+
+        if callsign in aircraft_labels:
+            move_aircraft_status(callsign, 'Departures')
+        else:
+            add_aircraft_to_status(callsign, 'Departures')
+
+        app.after(adjust_delay(1000), lambda: pushback_aircraft(main_canvas, aircraft_info, stand_n_node, final_direction, runway_target=runway_target))
+
+    def schedule_turnaround(aircraft_info, stand_node):
+        """Schedule a turnaround so an arriving aircraft later departs."""
+        delay_ms = get_turnaround_delay_ms()
+        callsign = aircraft_info.get('callsign')
+
+        def begin_departure():
+            if callsign not in active_aircraft:
                 return
-            
-            # Clear all existing aircraft from canvas
-            for callsign, ac_info in active_aircraft.items():
-                if 'triangle_id' in ac_info and ac_info['triangle_id']:
-                    main_canvas.delete(ac_info['triangle_id'])
-                if 'label_id' in ac_info and ac_info['label_id']:
-                    main_canvas.delete(ac_info['label_id'])
-                # Remove from status board
-                remove_aircraft_from_status(callsign)
-            
-            # Clear the active aircraft dictionary
-            active_aircraft.clear()
-            
-            # Get runway direction
-            runway = runway_var.get()
-            final_direction = "right" if runway == "09" else "left"
-            
-            # Determine hold point target (will continue to runway from there)
-            if runway == "27":
-                runway_target = "A1_HOLD"
-            else:  # runway == "09"
-                runway_target = "E1_HOLD"
-            
-            x, y = nodes["STAND1a"]
-            # Create aircraft facing north initially
-            triangle_id, label_id = draw_aircraft(main_canvas, x, y, "TEST001", "north")
-            
-            # Store aircraft information
+            if aircraft_info.get('node') != stand_node:
+                return
+            start_departure_from_stand(aircraft_info, stand_node)
+
+        aircraft_info['turnaround_job_id'] = app.after(adjust_delay(delay_ms), begin_departure)
+
+    global schedule_turnaround_cb
+    schedule_turnaround_cb = schedule_turnaround
+
+    def seed_initial_aircraft():
+        """Seed 2-5 parked aircraft on random stands and schedule turnarounds."""
+        if not main_canvas:
+            return
+        import random
+        available_stands = find_available_stands()
+        if not available_stands:
+            return
+        seed_count = min(len(available_stands), random.randint(2, 5))
+        seed_stands = random.sample(available_stands, seed_count)
+
+        for stand_node in seed_stands:
+            x, y = nodes[stand_node]
+            callsign = generate_unique_callsign("ARR")
+            triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, "north")
             aircraft_info = {
-                'callsign': 'TEST001',
+                'callsign': callsign,
                 'position': (x, y),
-                'node': 'STAND1a',
+                'node': stand_node,
                 'triangle_id': triangle_id,
                 'label_id': label_id,
                 'direction': 'north'
             }
-            active_aircraft['TEST001'] = aircraft_info
-            
-            # Add to Departures column
-            add_aircraft_to_status('TEST001', 'Departures')
-            
-            # Start pushback after a short delay, with runway target for subsequent taxi
-            app.after(adjust_delay(1000), lambda: pushback_aircraft(main_canvas, aircraft_info, "STAND1N", final_direction, runway_target=runway_target))
-    
+            active_aircraft[callsign] = aircraft_info
+            add_aircraft_to_status(callsign, 'Arrivals')
+            schedule_turnaround(aircraft_info, stand_node)
+
     def spawn_landing_aircraft():
         """Spawn a landing aircraft at the appropriate airborne node based on runway direction."""
         if not main_canvas:
             return
-        
-        # Check if there's an available stand for the arriving aircraft
+
+        if not is_runway_clear():
+            return
+
         available_stand = find_available_stand()
         if available_stand is None:
             print("Cannot spawn landing aircraft - no available stands")
             return
-        
-        # Get runway direction
+
         runway = runway_var.get()
-        
-        # Generate unique callsign
-        import random
-        callsign = f"ARR{random.randint(100, 999)}"
-        
-        # Determine spawn node and exit node based on runway
+        callsign = generate_unique_callsign("ARR")
+
         if runway == "27":
-            # Landing on runway 27 (from east to west)
-            spawn_node = "RWY09_AirBorne"  # Spawn from the east
-            runway_exit = "RWY09_C1"  # Exit via C nodes
-            direction = "left"  # Aircraft pointing west
-        else:  # runway == "09"
-            # Landing on runway 09 (from west to east)
-            spawn_node = "RWY27_AirBorne"  # Spawn from the west
-            runway_exit = "RWY27_B1"  # Exit via B nodes
-            direction = "right"  # Aircraft pointing east
-        
-        # Create aircraft at spawn node
+            spawn_node = "RWY09_AirBorne"
+            runway_exit = "RWY09_C1"
+            direction = "left"
+        else:
+            spawn_node = "RWY27_AirBorne"
+            runway_exit = "RWY27_B1"
+            direction = "right"
+
         x, y = nodes[spawn_node]
         triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, direction)
-        
-        # Store aircraft information with reserved target stand
+
         aircraft_info = {
             'callsign': callsign,
             'position': (x, y),
@@ -1663,44 +1767,59 @@ def build_home_screen():
             'triangle_id': triangle_id,
             'label_id': label_id,
             'direction': direction,
-            'target_stand': available_stand  # Reserve this stand for this aircraft
+            'target_stand': available_stand
         }
         active_aircraft[callsign] = aircraft_info
-        
-        # Add to Arrivals column initially
         add_aircraft_to_status(callsign, 'Arrivals')
-        
-        # Start landing sequence after a short delay
         app.after(adjust_delay(500), lambda: landing_aircraft(main_canvas, aircraft_info, runway_exit))
+
+    def get_activity_delay_ms():
+        import random
+        rate = tfr_var.get()
+        if rate == "High":
+            return random.randint(6000, 12000)
+        if rate == "Medium":
+            return random.randint(10000, 20000)
+        return random.randint(16000, 30000)
+
+    def schedule_next_activity():
+        global simulation_running, activity_job_id
+        if not simulation_running:
+            return
+
+        available_stands = find_available_stands()
+        can_arrive = len(available_stands) > 0 and is_runway_clear()
+
+        if can_arrive:
+            spawn_landing_aircraft()
+
+        delay_ms = get_activity_delay_ms()
+        activity_job_id = app.after(adjust_delay(delay_ms), schedule_next_activity)
+
+    def start_activity():
+        global simulation_running, activity_job_id
+        if simulation_running:
+            return
+        clear_existing_aircraft()
+        simulation_running = True
+        seed_initial_aircraft()
+        schedule_next_activity()
     
     # Button panel for run and speed control
     button_panel = ctk.CTkFrame(controls_main)
     button_panel.pack(side="right", padx=20, pady=10)
     
     run_btn = ctk.CTkButton(
-        button_panel, 
-        text="▶ Run Simulation", 
+        button_panel,
+        text="▶ Play",
         font=("Arial", 14, "bold"),
         fg_color="#1e88e5",
         hover_color="#1565c0",
         height=60,
         width=200,
-        command=run_simulation
+        command=start_activity
     )
     run_btn.pack(pady=(0, 10))
-    
-    # Add Landing Aircraft button
-    landing_btn = ctk.CTkButton(
-        button_panel,
-        text="✈ Spawn Landing Aircraft",
-        font=("Arial", 12, "bold"),
-        fg_color="#ff9800",
-        hover_color="#f57c00",
-        height=50,
-        width=200,
-        command=spawn_landing_aircraft
-    )
-    landing_btn.pack(pady=(0, 10))
     
     # Speed control - toggle button that cycles through speeds
     speed_options = [1.0, 2.0, 5.0, 10.0]
