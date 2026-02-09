@@ -1575,7 +1575,7 @@ def build_home_screen():
     # ===== INBOUND RADAR STRIP =====
     inbound_frame = ctk.CTkFrame(app)
     inbound_frame.pack(fill="x", padx=10, pady=(0, 10))
-    ctk.CTkLabel(inbound_frame, text="Inbound Final (Top View)", font=("Arial", 12, "bold")).pack(anchor="w", padx=8, pady=(6, 2))
+    ctk.CTkLabel(inbound_frame, text="RADAR", font=("Arial", 12, "bold")).pack(anchor="w", padx=8, pady=(6, 2))
 
     inbound_canvas_frame = ctk.CTkFrame(inbound_frame)
     inbound_canvas_frame.pack(fill="x", padx=8, pady=(0, 8))
@@ -1879,15 +1879,23 @@ def build_home_screen():
             return
 
         padding = 12
-        left_x = int(width * 0.35)
-        right_x = int(width * 0.65)
+        mid_y = height // 2
+        mid_x = width // 2
 
         canvas.create_rectangle(2, 2, width - 2, height - 2, outline="#335577", width=1)
-        canvas.create_line(left_x, padding, left_x, height - padding, fill="#4d6a8a", width=2)
-        canvas.create_line(right_x, padding, right_x, height - padding, fill="#4d6a8a", width=2)
-        canvas.create_text(left_x, height - padding - 8, text="RWY27", fill="#a7c7e7", font=("Arial", 9, "bold"))
-        canvas.create_text(right_x, height - padding - 8, text="RWY09", fill="#a7c7e7", font=("Arial", 9, "bold"))
+        canvas.create_line(padding, mid_y, width - padding, mid_y, fill="#4d6a8a", width=2)
         canvas.create_text(width - padding - 5, padding, text=f"{inbound_range_nm}nm", fill="#7fa3c7", anchor="ne", font=("Arial", 9))
+
+        runway_len = 40
+        runway_w = 6
+        canvas.create_rectangle(
+            mid_x - runway_len // 2,
+            mid_y - runway_w // 2,
+            mid_x + runway_len // 2,
+            mid_y + runway_w // 2,
+            fill="#6f88a3",
+            outline="#6f88a3",
+        )
 
         speed_nm_per_sec = 0.2 * simulation_speed
         step_nm = speed_nm_per_sec * 0.2
@@ -1897,9 +1905,13 @@ def build_home_screen():
                 track['distance_nm'] = max(0.0, track['distance_nm'] - step_nm)
 
             is_final = track.get('runway') == "27"
-            x = left_x if is_final else right_x
+            y = mid_y
             dist_ratio = min(1.0, max(0.0, track['distance_nm'] / float(inbound_range_nm)))
-            y = padding + int((1.0 - dist_ratio) * (height - 2 * padding))
+            approach_span = (mid_x - padding)
+            if is_final:
+                x = mid_x + int(dist_ratio * approach_span)
+            else:
+                x = mid_x - int(dist_ratio * approach_span)
 
             canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#ffb347", outline="#ffb347")
             canvas.create_text(x + 10, y, text=track['callsign'], fill="#ffcf99", anchor="w", font=("Arial", 9, "bold"))
