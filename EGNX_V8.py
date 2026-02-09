@@ -359,7 +359,7 @@ def continuous_stop_bar_update():
 
 # ==============================
 # DRAW AIRCRAFT
-def draw_aircraft(canvas, x, y, callsign="TEST", direction="north"):
+def draw_aircraft(canvas, x, y, callsign="TEST", direction="north", color="blue"):
     """Draw a blue triangle representing an aircraft at the given position.
     
     The front tip of the triangle is always at position (x, y).
@@ -375,7 +375,7 @@ def draw_aircraft(canvas, x, y, callsign="TEST", direction="north"):
             x, y,               # Front point at top
             x-size, y+2*size,   # Bottom left
             x+size, y+2*size,   # Bottom right
-            fill="blue"
+            fill=color
         )
     elif direction == "right":
         # Triangle pointing right (for runway 09) - tip at (x, y)
@@ -383,7 +383,7 @@ def draw_aircraft(canvas, x, y, callsign="TEST", direction="north"):
             x, y,               # Front point at right
             x-2*size, y-size,   # Top left
             x-2*size, y+size,   # Bottom left
-            fill="blue"
+            fill=color
         )
     else:  # direction == "left"
         # Triangle pointing left (for runway 27) - tip at (x, y)
@@ -391,7 +391,7 @@ def draw_aircraft(canvas, x, y, callsign="TEST", direction="north"):
             x, y,               # Front point at left
             x+2*size, y-size,   # Top right
             x+2*size, y+size,   # Bottom right
-            fill="blue"
+            fill=color
         )
     
     label_id = canvas.create_text(x, y-size-10, text=callsign, fill="white", font=("Arial", 10, "bold"))
@@ -1317,6 +1317,9 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
             
             # Move to Arrivals status
             move_aircraft_status(aircraft_info['callsign'], 'Arrivals')
+
+            if 'triangle_id' in aircraft_info and aircraft_info['triangle_id']:
+                canvas.itemconfig(aircraft_info['triangle_id'], fill="blue")
             
             # Clear the ignore_stop_bars flag
             aircraft_info['ignore_stop_bars'] = False
@@ -1719,7 +1722,7 @@ def build_home_screen():
         for stand_node in seed_stands:
             x, y = nodes[stand_node]
             callsign = generate_unique_callsign("ARR")
-            triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, "north")
+            triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, "north", color="blue")
             aircraft_info = {
                 'callsign': callsign,
                 'position': (x, y),
@@ -1758,7 +1761,7 @@ def build_home_screen():
             direction = "right"
 
         x, y = nodes[spawn_node]
-        triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, direction)
+        triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, direction, color="orange")
 
         aircraft_info = {
             'callsign': callsign,
