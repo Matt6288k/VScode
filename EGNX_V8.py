@@ -36,7 +36,34 @@ nodes = {
     "TXY_C1": (645, 158),"C1_HOLD": (645, 120), "RWY09_C1": (645, 70),
     "TXY_D1": (214, 158),"D1_HOLD": (214, 120), "RWY09_D1": (214, 70),
     "TXY_E1": (105, 158),"E1_HOLD": (105, 120), "RWY09_E1": (105, 70), "RWY27_AirBorne": (0,70),
+    "10m9": (20, 280),
+    "9m9": (49.285714, 280),
+    "8m9": (78.571429, 280),
+    "7m9": (107.857143, 280),
+    "6m9": (137.142857, 280),
+    "5m9": (166.428571, 280),
+    "4m9": (195.714286, 280),
+    "3m9": (225.0, 280),
+    "2m9": (254.285714, 280),
+    "1m9": (283.571429, 280),
+    "0m9": (312.857143, 280),
+    "0m27": (342.142857, 280),
+    "1m27": (371.428571, 280),
+    "2m27": (400.714286, 280),
+    "3m27": (430.0, 280),
+    "4m27": (459.285714, 280),
+    "5m27": (488.571429, 280),
+    "6m27": (517.857143, 280),
+    "7m27": (547.142857, 280),
+    "8m27": (576.428571, 280),
+    "9m27": (605.714286, 280),
+    "10m27": (635, 280),
 }
+
+RUNWAY_TICK_NODES = [
+    "10m9", "9m9", "8m9", "7m9", "6m9", "5m9", "4m9", "3m9", "2m9", "1m9", "0m9",
+    "0m27", "1m27", "2m27", "3m27", "4m27", "5m27", "6m27", "7m27", "8m27", "9m27", "10m27",
+]
 
 edges = {
     "RWY27_A1": ["A1_HOLD","RWY27_B1","RWY27_AirBorne"],
@@ -62,6 +89,13 @@ edges = {
     "STAND6b": ["STAND6N","STAND6a"],
     "STAND7b": ["STAND7N","STAND7a"],
     "STAND8b": ["STAND8N","STAND8a"],
+    "10m9": ["9m9"],"9m9": ["8m9"],"8m9": ["7m9"],
+    "7m9": ["6m9"],"6m9": ["5m9"],"5m9": ["4m9"],
+    "4m9": ["3m9"],"3m9": ["2m9"],"2m9": ["1m9"],
+    "1m9": ["0m9"],"0m27": ["1m27"],
+    "1m27": ["2m27"], "2m27": ["3m27"], "3m27": ["4m27"], 
+    "4m27": ["5m27"], "5m27": ["6m27"], "6m27": ["7m27"], 
+    "7m27": ["8m27"], "8m27": ["9m27"], "9m27": ["10m27"],
 }
 
 # Build bidirectional edges
@@ -203,10 +237,6 @@ graph_visible = True  # Track whether graph is currently visible
 simulation_running = False
 activity_job_id = None
 schedule_turnaround_cb = None
-inbound_tracks = []
-inbound_reserved_stands = set()
-inbound_canvas = None
-inbound_range_nm = 10
 
 # ==============================
 # SPEED CONTROL HELPER
@@ -228,6 +258,27 @@ def draw_graph(canvas):
     
     # Clear existing graph element IDs
     graph_element_ids = []
+
+    # Draw runway distance line (10m27 to 10m9)
+    # Intentionally not tracked in graph_element_ids so it stays visible when toggling nodes.
+    if "10m27" in nodes and "10m9" in nodes:
+        x1, y1 = nodes["10m27"]
+        x2, y2 = nodes["10m9"]
+        canvas.create_line(x1, y1, x2, y2, fill="white", width=2)
+
+    # Draw grey center segment between 0m9 and 0m27
+    if "0m9" in nodes and "0m27" in nodes:
+        x1, y1 = nodes["0m9"]
+        x2, y2 = nodes["0m27"]
+        canvas.create_line(x1, y1, x2, y2, fill="grey", width=6)
+
+    # Draw small perpendicular ticks for runway distance nodes
+    tick_half = 4
+    for node_name in RUNWAY_TICK_NODES:
+        if node_name not in nodes:
+            continue
+        x, y = nodes[node_name]
+        canvas.create_line(x, y - tick_half, x, y + tick_half, fill="white", width=2)
     
     # Draw edges (connections) first so they appear under the nodes
     for node, neighbors in edges.items():
@@ -310,9 +361,11 @@ def draw_stop_bars(canvas):
         # 1. Aircraft is at a hold point
         # 2. Runway is clear
         # 3. Aircraft is NOT a landing aircraft (doesn't have ignore_stop_bars flag)
+        # 4. No arrival is within 5nm of the runway
         is_landing_aircraft = info.get('ignore_stop_bars', False)
+        arrival_too_close = is_arrival_within_5nm()
         
-        if node and node.endswith('_HOLD') and is_runway_clear() and not is_landing_aircraft:
+        if node and node.endswith('_HOLD') and is_runway_clear() and not is_landing_aircraft and not arrival_too_close:
             # If this hold's stop bar isn't already off, turn it off now and set timer
             if node not in stop_bar_off_until or current_time >= stop_bar_off_until[node]:
                 stop_bar_duration = 1.2 / simulation_speed  # Adjust duration based on simulation speed
@@ -324,9 +377,9 @@ def draw_stop_bars(canvas):
             
         items = []
         
-        # Red lights are OFF if we're within the 2-second timer period
-        # Red lights turn back ON after 2 seconds
-        is_off = hold_name in stop_bar_off_until and current_time < stop_bar_off_until[hold_name]
+        # Red lights are OFF if we're within the timer period AND no arrival is within 5nm
+        # Red lights turn back ON immediately if arrival comes within 5nm
+        is_off = hold_name in stop_bar_off_until and current_time < stop_bar_off_until[hold_name] and not is_arrival_within_5nm()
         show_red_lights = not is_off
         
         # Draw red stop bar lights
@@ -605,8 +658,11 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
             # Check if stop bar at this hold point is illuminated (red lights on)
             stop_bar_illuminated = current_node in stop_bar_draw_ids and len(stop_bar_draw_ids.get(current_node, [])) > 0
             
-            if not is_runway_clear() or stop_bar_illuminated:
-                # Runway is occupied or stop bar is on, wait and check again
+            # Also check if any arrival is within 5nm of the runway
+            arrival_too_close = is_arrival_within_5nm()
+            
+            if not is_runway_clear() or stop_bar_illuminated or arrival_too_close:
+                # Runway is occupied, stop bar is on, or arrival is too close - wait and check again
                 aircraft_info['waiting_at_hold'] = True
                 app.after(adjust_delay(1000), move_to_next_node)  # Check again
                 # Update stop bars in case this aircraft's presence changes the state
@@ -614,7 +670,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
                     update_stop_bars(main_canvas)
                 return
             else:
-                # Runway is clear and stop bar is off, proceed and update status
+                # Runway is clear, stop bar is off, and no arrivals too close - proceed and update status
                 aircraft_info['waiting_at_hold'] = False
                 move_aircraft_status(aircraft_info['callsign'], 'Runway')
                 # Update stop bars to show runway is now occupied
@@ -771,39 +827,98 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
     move_to_next_node()
 
 # ==============================
-# RUNWAY OCCUPANCY CHECK
-def distance_point_to_segment(px, py, ax, ay, bx, by):
-    """Return the minimum distance from point P to segment AB."""
-    abx = bx - ax
-    aby = by - ay
-    apx = px - ax
-    apy = py - ay
+# ARRIVAL SPACING HELPERS
+def get_arrival_node_index(node_name):
+    """Get the index of a node in the runway tick sequence, or None if not found."""
+    if node_name in RUNWAY_TICK_NODES:
+        return RUNWAY_TICK_NODES.index(node_name)
+    return None
 
-    ab_len_sq = abx * abx + aby * aby
-    if ab_len_sq == 0:
-        return math.hypot(px - ax, py - ay)
+def get_closest_inbound_arrival():
+    """Return the node index of the closest inbound arrival aircraft, or None."""
+    closest_idx = None
+    for callsign, info in active_aircraft.items():
+        # Check if this is an inbound arrival (has radar_dot_id or is orange triangle on approach)
+        node = info.get('node')
+        if node and node in RUNWAY_TICK_NODES:
+            idx = get_arrival_node_index(node)
+            if idx is not None:
+                if closest_idx is None or abs(idx - 10) < abs(closest_idx - 10):
+                    closest_idx = idx
+    return closest_idx
 
-    t = (apx * abx + apy * aby) / ab_len_sq
-    t = max(0.0, min(1.0, t))
-    closest_x = ax + t * abx
-    closest_y = ay + t * aby
-    return math.hypot(px - closest_x, py - closest_y)
-
-def is_position_on_runway(px, py, max_offset=18):
-    """Return True if (px, py) is close to the runway centerline."""
-    runway_path = ["RWY27_A1", "RWY27_B1", "RWY09_C1", "RWY09_D1", "RWY09_E1"]
-    for i in range(len(runway_path) - 1):
-        ax, ay = nodes[runway_path[i]]
-        bx, by = nodes[runway_path[i + 1]]
-        if distance_point_to_segment(px, py, ax, ay, bx, by) <= max_offset:
+def has_departing_aircraft():
+    """Check if there are any aircraft taxiing for departure or waiting at hold points."""
+    for callsign, info in active_aircraft.items():
+        # Check if aircraft is in Departures or Taxiing status
+        if callsign in aircraft_labels:
+            status = aircraft_labels[callsign].get('column')
+            if status in ['Departures', 'Taxiing']:
+                return True
+        
+        # Check if aircraft is at a hold point
+        node = info.get('node')
+        if node and node.endswith('_HOLD'):
             return True
+    
     return False
 
+def can_spawn_new_arrival(spawn_node_name):
+    """Check if a new arrival can spawn at the given spawn node.
+    
+    Spacing requirement:
+    - Normal: >3.5nm from any arrival
+    - With departures waiting: >6nm from any arrival (to allow departures between arrivals)
+    
+    Args:
+        spawn_node_name: The node where the aircraft will spawn ("10m9" or "10m27")
+    """
+    if spawn_node_name not in RUNWAY_TICK_NODES:
+        return False
+    
+    spawn_idx = RUNWAY_TICK_NODES.index(spawn_node_name)
+    
+    # Use 6nm spacing if there are departures waiting, otherwise 3.5nm
+    min_spacing = 6.0 if has_departing_aircraft() else 3.5
+    
+    # Check all aircraft on the radar path
+    for callsign, info in active_aircraft.items():
+        node = info.get('node')
+        if node and node in RUNWAY_TICK_NODES:
+            idx = get_arrival_node_index(node)
+            if idx is not None:
+                # Check if this aircraft is within required spacing of the spawn point
+                distance = abs(idx - spawn_idx)
+                if distance < min_spacing:
+                    return False
+    
+    return True
+
+def is_arrival_within_5nm():
+    """Check if any arrival is within 5nm (5 nodes) of the runway center (0m9/0m27)."""
+    center_idx_09 = RUNWAY_TICK_NODES.index("0m9")
+    center_idx_27 = RUNWAY_TICK_NODES.index("0m27")
+    
+    for callsign, info in active_aircraft.items():
+        node = info.get('node')
+        if node and node in RUNWAY_TICK_NODES:
+            idx = get_arrival_node_index(node)
+            if idx is not None:
+                # Check if within 5 nodes of either center
+                dist_09 = abs(idx - center_idx_09)
+                dist_27 = abs(idx - center_idx_27)
+                if min(dist_09, dist_27) <= 5:
+                    return True
+    return False
+
+# ==============================
+# RUNWAY OCCUPANCY CHECK
 def is_runway_clear():
     """Check if the runway is clear (no aircraft in Runway status or at runway nodes)."""
     global runway_protected
     
     # Check if any aircraft is in the Runway status column
+    # (Landing aircraft stay in this status until they pass the runway exit)
     for callsign, info in active_aircraft.items():
         if callsign in aircraft_labels:
             current_column = aircraft_labels[callsign].get('column')
@@ -815,15 +930,6 @@ def is_runway_clear():
     runway_nodes = ['RWY27_A1', 'RWY27_B1', 'RWY09_C1', 'RWY09_D1', 'RWY09_E1']
     for callsign, info in active_aircraft.items():
         if info.get('node') in runway_nodes:
-            runway_protected = False  # Runway occupied
-            return False
-
-    # Position-based check to catch aircraft already on the runway but not yet at a node
-    for callsign, info in active_aircraft.items():
-        pos = info.get('position')
-        if not pos:
-            continue
-        if is_position_on_runway(pos[0], pos[1]):
             runway_protected = False  # Runway occupied
             return False
     
@@ -1023,15 +1129,11 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
         aircraft_info['runway_exit_idx'] = len(route) - 1
     
     # Track status changes
-    moved_to_runway = [False]
+    moved_to_taxiing = [False]
     
     def move_through_route():
         """Move aircraft through each segment of the landing route."""
         route_idx = aircraft_info.get('route_index', 0)
-
-        if not moved_to_runway[0]:
-            move_aircraft_status(aircraft_info['callsign'], 'Runway')
-            moved_to_runway[0] = True
         
         if route_idx >= len(route) - 1:
             # Completed landing sequence, now taxi to stand
@@ -1127,6 +1229,12 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
             
             # Calculate progress through this segment
             progress = step / steps
+            
+            # Move to Taxiing status once aircraft has passed the runway exit node
+            runway_exit_idx = aircraft_info.get('runway_exit_idx', len(route) - 1)
+            if route_idx > runway_exit_idx and not moved_to_taxiing[0]:
+                move_aircraft_status(aircraft_info['callsign'], 'Taxiing')
+                moved_to_taxiing[0] = True
             
             # Calculate current speed with smooth deceleration
             if is_decelerating:
@@ -1273,8 +1381,6 @@ def is_stand_available(stand_name):
         # Check if stand is reserved as target for a landing aircraft
         if info.get('target_stand', '') == stand_name:
             return False
-    if stand_name in inbound_reserved_stands:
-        return False
     return True
 
 def find_available_stand():
@@ -1292,8 +1398,6 @@ def find_available_stand():
         target = info.get('target_stand', '')
         if target in stands:
             occupied_stands.add(target)
-
-    occupied_stands.update(inbound_reserved_stands)
     
     # Find first available stand
     for stand in stands:
@@ -1314,7 +1418,6 @@ def find_available_stands():
         target = info.get('target_stand', '')
         if target in stands:
             occupied_stands.add(target)
-    occupied_stands.update(inbound_reserved_stands)
     return [stand for stand in stands if stand not in occupied_stands]
 
 def is_safe_to_move(callsign, next_x, next_y, min_distance=28):
@@ -1560,6 +1663,9 @@ def build_home_screen():
         top_photo = ImageTk.PhotoImage(top_img)
         main_canvas.create_image(0, 0, anchor="nw", image=top_photo)
         main_canvas.image = top_photo  # Keep a reference to prevent garbage collection
+
+        # Radar display frame (placeholder)
+        main_canvas.create_rectangle(10, 210, 645, 350, fill="black", outline="white", width=2)
         
         # Draw nodes and edges on top of the map
         draw_graph(main_canvas)
@@ -1571,21 +1677,6 @@ def build_home_screen():
         print(f"Error loading map image: {e}")
         placeholder = ctk.CTkLabel(app, text="[Map image not available]", font=("Arial", 16, "bold"), text_color="white")
         placeholder.pack(pady=10)
-
-    # ===== INBOUND RADAR STRIP =====
-    inbound_frame = ctk.CTkFrame(app)
-    inbound_frame.pack(fill="x", padx=10, pady=(0, 10))
-    ctk.CTkLabel(inbound_frame, text="RADAR", font=("Arial", 12, "bold")).pack(anchor="w", padx=8, pady=(6, 2))
-
-    inbound_canvas_frame = ctk.CTkFrame(inbound_frame)
-    inbound_canvas_frame.pack(fill="x", padx=8, pady=(0, 8))
-    inbound_canvas_width = screen_width - 40
-    inbound_canvas_height = 120
-    inbound_canvas_local = tk.Canvas(inbound_canvas_frame, height=inbound_canvas_height, highlightthickness=0, bg="#0b1a2b")
-    inbound_canvas_local.pack(fill="x")
-
-    global inbound_canvas
-    inbound_canvas = inbound_canvas_local
 
     # ===== MIDDLE SECTION: Controls Row =====
     controls_main = ctk.CTkFrame(app)
@@ -1689,6 +1780,10 @@ def build_home_screen():
                     app.after_cancel(turnaround_job_id)
                 except Exception:
                     pass
+            if 'radar_dot_id' in ac_info and ac_info['radar_dot_id']:
+                main_canvas.delete(ac_info['radar_dot_id'])
+            if 'radar_label_id' in ac_info and ac_info['radar_label_id']:
+                main_canvas.delete(ac_info['radar_label_id'])
             if 'triangle_id' in ac_info and ac_info['triangle_id']:
                 main_canvas.delete(ac_info['triangle_id'])
             if 'label_id' in ac_info and ac_info['label_id']:
@@ -1794,7 +1889,7 @@ def build_home_screen():
             add_aircraft_to_status(callsign, 'Arrivals')
             schedule_turnaround(aircraft_info, stand_node)
 
-    def spawn_landing_aircraft(callsign=None, runway=None, target_stand=None):
+    def spawn_landing_aircraft():
         """Spawn a landing aircraft at the appropriate airborne node based on runway direction."""
         if not main_canvas:
             return
@@ -1802,39 +1897,142 @@ def build_home_screen():
         if not is_runway_clear():
             return
 
-        if target_stand is None:
-            target_stand = find_available_stand()
-            if target_stand is None:
-                print("Cannot spawn landing aircraft - no available stands")
-                return
+        available_stand = find_available_stand()
+        if available_stand is None:
+            print("Cannot spawn landing aircraft - no available stands")
+            return
 
-        runway = runway or runway_var.get()
-        callsign = callsign or generate_unique_callsign("ARR")
+        runway = runway_var.get()
+        
+        # Determine spawn point based on runway
+        if runway == "27":
+            radar_spawn_node = "10m27"
+        else:
+            radar_spawn_node = "10m9"
+        
+        # Check arrival spacing - must be >3.5nm from any arrival at this specific spawn point
+        if not can_spawn_new_arrival(radar_spawn_node):
+            return
+
+        callsign = generate_unique_callsign("ARR")
 
         if runway == "27":
+            radar_start_node = "10m27"
+            radar_end_node = "0m27"
             spawn_node = "RWY09_AirBorne"
             runway_exit = "RWY09_C1"
             direction = "left"
         else:
+            radar_start_node = "10m9"
+            radar_end_node = "0m9"
             spawn_node = "RWY27_AirBorne"
             runway_exit = "RWY27_B1"
             direction = "right"
 
-        x, y = nodes[spawn_node]
-        triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, direction, color="orange")
+        def animate_radar_inbound():
+            if radar_start_node not in nodes or radar_end_node not in nodes:
+                return
 
-        aircraft_info = {
-            'callsign': callsign,
-            'position': (x, y),
-            'node': spawn_node,
-            'triangle_id': triangle_id,
-            'label_id': label_id,
-            'direction': direction,
-            'target_stand': target_stand
-        }
-        active_aircraft[callsign] = aircraft_info
+            if radar_start_node not in RUNWAY_TICK_NODES or radar_end_node not in RUNWAY_TICK_NODES:
+                return
+
+            start_idx = RUNWAY_TICK_NODES.index(radar_start_node)
+            end_idx = RUNWAY_TICK_NODES.index(radar_end_node)
+            if start_idx <= end_idx:
+                path_nodes = RUNWAY_TICK_NODES[start_idx:end_idx + 1]
+            else:
+                path_nodes = list(reversed(RUNWAY_TICK_NODES[end_idx:start_idx + 1]))
+
+            if len(path_nodes) < 2:
+                return
+
+            segment_duration_ms = 25000
+            frame_interval_ms = 50
+            steps_per_segment = max(1, int(segment_duration_ms / frame_interval_ms))
+            dot_radius = 3
+
+            start_x, start_y = nodes[path_nodes[0]]
+
+            radar_dot_id = main_canvas.create_oval(
+                start_x - dot_radius, start_y - dot_radius,
+                start_x + dot_radius, start_y + dot_radius,
+                fill="orange", outline="orange"
+            )
+            
+            radar_label_id = main_canvas.create_text(
+                start_x, start_y - 12,
+                text=callsign,
+                fill="white",
+                font=("Arial", 8, "bold")
+            )
+
+            active_aircraft[callsign] = {
+                'callsign': callsign,
+                'position': (start_x, start_y),
+                'node': radar_start_node,
+                'radar_dot_id': radar_dot_id,
+                'radar_label_id': radar_label_id,
+                'direction': direction,
+                'target_stand': available_stand
+            }
+
+            def move_segment(segment_idx=0, step_idx=0):
+                if callsign not in active_aircraft:
+                    main_canvas.delete(radar_dot_id)
+                    if 'radar_label_id' in active_aircraft.get(callsign, {}):
+                        main_canvas.delete(active_aircraft[callsign]['radar_label_id'])
+                    return
+
+                if segment_idx >= len(path_nodes) - 1:
+                    main_canvas.delete(radar_dot_id)
+                    if 'radar_label_id' in active_aircraft[callsign]:
+                        main_canvas.delete(active_aircraft[callsign]['radar_label_id'])
+                    spawn_x, spawn_y = nodes[spawn_node]
+                    triangle_id, label_id = draw_aircraft(
+                        main_canvas, spawn_x, spawn_y, callsign, direction, color="orange"
+                    )
+                    aircraft_info = {
+                        'callsign': callsign,
+                        'position': (spawn_x, spawn_y),
+                        'node': spawn_node,
+                        'triangle_id': triangle_id,
+                        'label_id': label_id,
+                        'direction': direction,
+                        'target_stand': available_stand
+                    }
+                    active_aircraft[callsign] = aircraft_info
+                    # Move to Runway status immediately to prevent departures
+                    move_aircraft_status(callsign, 'Runway')
+                    app.after(adjust_delay(500), lambda: landing_aircraft(main_canvas, aircraft_info, runway_exit))
+                    return
+
+                seg_start = nodes[path_nodes[segment_idx]]
+                seg_end = nodes[path_nodes[segment_idx + 1]]
+                dx = seg_end[0] - seg_start[0]
+                dy = seg_end[1] - seg_start[1]
+                t = min(1.0, step_idx / steps_per_segment)
+                x = seg_start[0] + dx * t
+                y = seg_start[1] + dy * t
+                main_canvas.coords(
+                    radar_dot_id,
+                    x - dot_radius, y - dot_radius,
+                    x + dot_radius, y + dot_radius
+                )
+                if 'radar_label_id' in active_aircraft[callsign]:
+                    main_canvas.coords(active_aircraft[callsign]['radar_label_id'], x, y - 12)
+                active_aircraft[callsign]['position'] = (x, y)
+
+                if step_idx >= steps_per_segment:
+                    active_aircraft[callsign]['node'] = path_nodes[segment_idx + 1]
+                    app.after(adjust_delay(frame_interval_ms), lambda: move_segment(segment_idx + 1, 0))
+                    return
+
+                app.after(adjust_delay(frame_interval_ms), lambda: move_segment(segment_idx, step_idx + 1))
+
+            move_segment()
+
         add_aircraft_to_status(callsign, 'Arrivals')
-        app.after(adjust_delay(500), lambda: landing_aircraft(main_canvas, aircraft_info, runway_exit))
+        animate_radar_inbound()
 
     def get_activity_delay_ms():
         import random
@@ -1845,89 +2043,6 @@ def build_home_screen():
             return random.randint(10000, 20000)
         return random.randint(16000, 30000)
 
-    def create_inbound_track():
-        """Create a top-view inbound track that will spawn onto the map at final."""
-        if not is_runway_clear():
-            return
-
-        target_stand = find_available_stand()
-        if target_stand is None:
-            return
-
-        runway = runway_var.get()
-        callsign = generate_unique_callsign("ARR")
-        inbound_reserved_stands.add(target_stand)
-
-        inbound_tracks.append({
-            'callsign': callsign,
-            'distance_nm': float(inbound_range_nm),
-            'runway': runway,
-            'target_stand': target_stand,
-        })
-
-    def update_inbound_radar():
-        if not inbound_canvas:
-            return
-
-        canvas = inbound_canvas
-        canvas.delete("all")
-
-        width = int(canvas.winfo_width())
-        height = int(canvas.winfo_height())
-        if width <= 1 or height <= 1:
-            app.after(200, update_inbound_radar)
-            return
-
-        padding = 12
-        mid_y = height // 2
-        mid_x = width // 2
-
-        canvas.create_rectangle(2, 2, width - 2, height - 2, outline="#335577", width=1)
-        canvas.create_line(padding, mid_y, width - padding, mid_y, fill="#4d6a8a", width=2)
-        canvas.create_text(width - padding - 5, padding, text=f"{inbound_range_nm}nm", fill="#7fa3c7", anchor="ne", font=("Arial", 9))
-
-        runway_len = 40
-        runway_w = 6
-        canvas.create_rectangle(
-            mid_x - runway_len // 2,
-            mid_y - runway_w // 2,
-            mid_x + runway_len // 2,
-            mid_y + runway_w // 2,
-            fill="#6f88a3",
-            outline="#6f88a3",
-        )
-
-        speed_nm_per_sec = 0.2 * simulation_speed
-        step_nm = speed_nm_per_sec * 0.2
-
-        for track in list(inbound_tracks):
-            if simulation_running:
-                track['distance_nm'] = max(0.0, track['distance_nm'] - step_nm)
-
-            is_final = track.get('runway') == "27"
-            y = mid_y
-            dist_ratio = min(1.0, max(0.0, track['distance_nm'] / float(inbound_range_nm)))
-            approach_span = (mid_x - padding)
-            if is_final:
-                x = mid_x + int(dist_ratio * approach_span)
-            else:
-                x = mid_x - int(dist_ratio * approach_span)
-
-            canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#ffb347", outline="#ffb347")
-            canvas.create_text(x + 10, y, text=track['callsign'], fill="#ffcf99", anchor="w", font=("Arial", 9, "bold"))
-
-            if track['distance_nm'] <= 0.0:
-                if is_runway_clear():
-                    inbound_tracks.remove(track)
-                    inbound_reserved_stands.discard(track['target_stand'])
-                    spawn_landing_aircraft(
-                        callsign=track['callsign'],
-                        runway=track['runway'],
-                        target_stand=track['target_stand']
-                    )
-
-        app.after(200, update_inbound_radar)
-
     def schedule_next_activity():
         global simulation_running, activity_job_id
         if not simulation_running:
@@ -1937,7 +2052,7 @@ def build_home_screen():
         can_arrive = len(available_stands) > 0 and is_runway_clear()
 
         if can_arrive:
-            create_inbound_track()
+            spawn_landing_aircraft()
 
         delay_ms = get_activity_delay_ms()
         activity_job_id = app.after(adjust_delay(delay_ms), schedule_next_activity)
@@ -1947,12 +2062,9 @@ def build_home_screen():
         if simulation_running:
             return
         clear_existing_aircraft()
-        inbound_tracks.clear()
-        inbound_reserved_stands.clear()
         simulation_running = True
         seed_initial_aircraft()
         schedule_next_activity()
-        update_inbound_radar()
     
     # Button panel for run and speed control
     button_panel = ctk.CTkFrame(controls_main)
