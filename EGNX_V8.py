@@ -226,9 +226,10 @@ aircraft_rows = {}
 stop_bars = {}
 stop_bar_draw_ids = {}
 stop_bar_off_until = {}  # Track when each stop bar should turn back on (time-based)
+next_departure_release_time = 0.0  # Track when the next departure may be released (time-based)
 runway_protected = True  # Track if runway is protected (stop bars on)
-simulation_speed = 1.0  # Speed multiplier for simulation (1x, 2x, 5x, 10x)
-simulation_speed = 1.0  # Speed multiplier for simulation (1x, 2x, 5x, 10x)
+simulation_speed = 1.0  # Speed multiplier for simulation (1x, 10x)
+simulation_speed = 1.0  # Speed multiplier for simulation (1x, 10x)
 main_canvas = None  # Global reference to the canvas
 status_columns = {}  # Global reference to status board columns
 aircraft_labels = {}  # Track labels in each status column
@@ -342,7 +343,7 @@ def draw_stop_bars(canvas):
     is cleared to cross (runway is clear). Landing aircraft do NOT affect stop bar state.
     Lights turn back on 2 seconds after turning off.
     """
-    global stop_bar_draw_ids, stop_bar_off_until
+    global stop_bar_draw_ids, stop_bar_off_until, next_departure_release_time
     import time
     
     # Clear existing stop bars
@@ -367,7 +368,7 @@ def draw_stop_bars(canvas):
         
         if node and node.endswith('_HOLD') and is_runway_clear() and not is_landing_aircraft and not arrival_too_close:
             # If this hold's stop bar isn't already off, turn it off now and set timer
-            if node not in stop_bar_off_until or current_time >= stop_bar_off_until[node]:
+            if (node not in stop_bar_off_until or current_time >= stop_bar_off_until[node]) and current_time >= next_departure_release_time:
                 stop_bar_duration = 1.2 / simulation_speed  # Adjust duration based on simulation speed
                 stop_bar_off_until[node] = current_time + stop_bar_duration
     
@@ -501,6 +502,10 @@ def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right
     After pushback completes, starts taxi to runway if runway_target is provided.
     """
     import math
+
+    pushback_duration_ms = 100000  # 1m40s at 1x speed
+    post_pushback_wait_ms = 120000  # 2 minutes stationary at 1x speed
+    step_delay_ms = max(1, int(pushback_duration_ms / max(steps, 1)))
     
     start_x, start_y = aircraft_info['position']
     end_x, end_y = nodes[target_node]
@@ -534,7 +539,7 @@ def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right
             
             # Start taxi to runway if target provided
             if runway_target:
-                app.after(adjust_delay(500), lambda: taxi_aircraft(canvas, aircraft_info, runway_target))
+                app.after(adjust_delay(post_pushback_wait_ms), lambda: taxi_aircraft(canvas, aircraft_info, runway_target))
             return
         
         # Calculate current position
@@ -594,7 +599,7 @@ def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right
         aircraft_info['position'] = (curr_x, curr_y)
         
         # Schedule next step
-        app.after(adjust_delay(50), animate_step, current_step + 1)
+        app.after(adjust_delay(step_delay_ms), animate_step, current_step + 1)
     
     animate_step()
 
@@ -867,8 +872,7 @@ def can_spawn_new_arrival(spawn_node_name):
     """Check if a new arrival can spawn at the given spawn node.
     
     Spacing requirement:
-    - Normal: >3.5nm from any arrival
-    - With departures waiting: >6nm from any arrival (to allow departures between arrivals)
+    - Always: >=7 nodes from any arrival on final approach
     
     Args:
         spawn_node_name: The node where the aircraft will spawn ("10m9" or "10m27")
@@ -878,8 +882,8 @@ def can_spawn_new_arrival(spawn_node_name):
     
     spawn_idx = RUNWAY_TICK_NODES.index(spawn_node_name)
     
-    # Use 6nm spacing if there are departures waiting, otherwise 3.5nm
-    min_spacing = 6.0 if has_departing_aircraft() else 3.5
+    # Enforce 7-node separation between arrivals on final approach
+    min_spacing = 7
     
     # Check all aircraft on the radar path
     for callsign, info in active_aircraft.items():
@@ -894,8 +898,8 @@ def can_spawn_new_arrival(spawn_node_name):
     
     return True
 
-def is_arrival_within_5nm():
-    """Check if any arrival is within 5nm (5 nodes) of the runway center (0m9/0m27)."""
+def is_arrival_within_5_5nm():
+    """Check if any arrival is within 5.5nm (5.5 nodes) of the runway center (0m9/0m27)."""
     center_idx_09 = RUNWAY_TICK_NODES.index("0m9")
     center_idx_27 = RUNWAY_TICK_NODES.index("0m27")
     
@@ -905,6 +909,22 @@ def is_arrival_within_5nm():
             idx = get_arrival_node_index(node)
             if idx is not None:
                 # Check if within 5 nodes of either center
+                dist_09 = abs(idx - center_idx_09)
+                dist_27 = abs(idx - center_idx_27)
+                if min(dist_09, dist_27) <= 5:
+                    return True
+    return False
+
+def is_arrival_within_5nm():
+    """Check if any arrival is within 5nm (5 nodes) of the runway center (0m9/0m27)."""
+    center_idx_09 = RUNWAY_TICK_NODES.index("0m9")
+    center_idx_27 = RUNWAY_TICK_NODES.index("0m27")
+
+    for callsign, info in active_aircraft.items():
+        node = info.get('node')
+        if node and node in RUNWAY_TICK_NODES:
+            idx = get_arrival_node_index(node)
+            if idx is not None:
                 dist_09 = abs(idx - center_idx_09)
                 dist_27 = abs(idx - center_idx_27)
                 if min(dist_09, dist_27) <= 5:
@@ -946,7 +966,11 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
     then disappears and moves to the Airborne status column.
     """
     import math
+    import time
+    import random
     
+    global next_departure_release_time
+
     # Get starting position (current runway position)
     start_x, start_y = aircraft_info['position']
     end_x, end_y = nodes[airborne_node]
@@ -963,6 +987,9 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
     if 'heading' not in aircraft_info:
         aircraft_info['heading'] = target_heading
     
+    # Enforce departure separation (1 or 2 minutes, scaled by sim speed)
+    next_departure_release_time = time.time() + (random.choice([60, 120]) / simulation_speed)
+
     # Takeoff parameters
     initial_speed = 5  # Starting speed (pixels per frame)
     final_speed = 20   # Speed at rotation/liftoff (pixels per frame)
@@ -2083,7 +2110,7 @@ def build_home_screen():
     run_btn.pack(pady=(0, 10))
     
     # Speed control - toggle button that cycles through speeds
-    speed_options = [1.0, 2.0, 5.0, 10.0]
+    speed_options = [1.0, 10.0]
     speed_index = [0]  # Use list to allow modification in nested function
     speed_btn_ref = []  # Store reference to button for text updates
     
