@@ -13,7 +13,6 @@ screen_height = 1080
 # Get the directory where the script is located
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# ==============================
 # NODES & EDGES
 nodes = {
     "STAND1a": (835, 218), "STAND1b": (835, 240),
@@ -362,7 +361,7 @@ def draw_stop_bars(canvas):
         # 1. Aircraft is at a hold point
         # 2. Runway is clear
         # 3. Aircraft is NOT a landing aircraft (doesn't have ignore_stop_bars flag)
-        # 4. No arrival is within 5nm of the runway
+        # 4. No arrival is within 3nm (3 miles) of the runway
         is_landing_aircraft = info.get('ignore_stop_bars', False)
         arrival_too_close = is_arrival_within_5nm()
         
@@ -378,8 +377,8 @@ def draw_stop_bars(canvas):
             
         items = []
         
-        # Red lights are OFF if we're within the timer period AND no arrival is within 5nm
-        # Red lights turn back ON immediately if arrival comes within 5nm
+        # Red lights are OFF if we're within the timer period AND no arrival is within 3nm (3 miles)
+        # Red lights turn back ON immediately if arrival comes within 3nm
         is_off = hold_name in stop_bar_off_until and current_time < stop_bar_off_until[hold_name] and not is_arrival_within_5nm()
         show_red_lights = not is_off
         
@@ -495,20 +494,29 @@ def remove_aircraft_from_status(callsign):
 
 # ==============================
 # PUSHBACK AIRCRAFT
-def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right", steps=30, runway_target=None):
+def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right", speed=1, runway_target=None):
     """Animate aircraft pushback from current position to target node.
     
     Aircraft starts facing north and gradually rotates to final_direction near the end.
     After pushback completes, starts taxi to runway if runway_target is provided.
+    
+    Args:
+        speed: Pixels per step - controls smoothness of movement (default: 2)
     """
     import math
 
-    pushback_duration_ms = 100000  # 1m40s at 1x speed
+    pushback_duration_ms = 90000  # 1m30s at 1x speed
     post_pushback_wait_ms = 120000  # 2 minutes stationary at 1x speed
-    step_delay_ms = max(1, int(pushback_duration_ms / max(steps, 1)))
     
     start_x, start_y = aircraft_info['position']
     end_x, end_y = nodes[target_node]
+    
+    # Calculate distance and steps based on speed (speed controls smoothness)
+    distance = math.hypot(end_x - start_x, end_y - start_y)
+    steps = max(int(distance / speed), 1)
+    
+    # Calculate step delay to achieve target duration
+    step_delay_ms = max(1, int(pushback_duration_ms / steps))
     
     step_x = (end_x - start_x) / steps
     step_y = (end_y - start_y) / steps
@@ -605,7 +613,7 @@ def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right
 
 # ==============================
 # TAXI AIRCRAFT ALONG PATH
-def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
+def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
     """Animate aircraft taxiing from current node to destination using pathfinding."""
     import math
     
@@ -663,7 +671,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
             # Check if stop bar at this hold point is illuminated (red lights on)
             stop_bar_illuminated = current_node in stop_bar_draw_ids and len(stop_bar_draw_ids.get(current_node, [])) > 0
             
-            # Also check if any arrival is within 5nm of the runway
+            # Also check if any arrival is within 3nm (3 miles) of the runway
             arrival_too_close = is_arrival_within_5nm()
             
             if not is_runway_clear() or stop_bar_illuminated or arrival_too_close:
@@ -709,11 +717,9 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
             next_segment_angle = math.degrees(math.atan2(next_end_y - end_y, next_end_x - end_x))
             has_next_segment = True
         
-        # Turn parameters
-        turn_zone_distance = 10  # Start turning within 15 pixels of node
-        max_turn_per_step = 8.0  # Moderate turn rate for realistic steering (degrees per step)
-        wheelbase = 40  # Distance from nose to main gear (affects turning behavior)
-        corner_cut_radius = 10  # How much to cut the corner (pixels)
+        # Turn parameters (simplified for smooth animation at 0.22 px/frame)
+        turn_zone_distance = 30  # Start turning 30 pixels before node
+        max_turn_per_step = 1.5  # Gradual turn rate (degrees per step)
         
         def animate_segment(step=0):
             if step >= steps:
@@ -724,14 +730,13 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
                 # Continue immediately to next segment for smooth transition
                 move_to_next_node()
                 return
-                return
             
-            # Calculate base position on straight line (nose/front of aircraft)
-            base_x = start_x + (step_x * step)
-            base_y = start_y + (step_y * step)
+            # Calculate position on straight line path
+            curr_x = start_x + (step_x * step)
+            curr_y = start_y + (step_y * step)
             
             # Calculate distance to next node
-            dist_to_next_node = math.hypot(end_x - base_x, end_y - base_y)
+            dist_to_next_node = math.hypot(end_x - curr_x, end_y - curr_y)
             
             # Calculate angle difference to next segment (if it exists)
             angle_diff_to_next = 0
@@ -742,35 +747,20 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
                 while angle_diff_to_next < -180:
                     angle_diff_to_next += 360
             
-            # Apply smooth corner cutting if we have a next segment, we're in the turn zone, and there's a significant angle change
-            curr_x = base_x
-            curr_y = base_y
-            
-            # Only apply corner cutting if the angle change is significant (more than 5 degrees)
-            if has_next_segment and dist_to_next_node <= turn_zone_distance and abs(angle_diff_to_next) > 5:
-                # Calculate how much to cut the corner based on distance to node
-                # Use a smooth easing function (cubic) for even smoother transition
-                linear_factor = 1.0 - (dist_to_next_node / turn_zone_distance)  # 0 at edge, 1 at node
-                cut_factor = linear_factor * linear_factor * linear_factor  # Cubic easing for smoothness
-                
-                # Calculate bisector angle (halfway between current and next segment)
-                bisector_angle = target_angle + (angle_diff_to_next * 0.5)
-                bisector_rad = math.radians(bisector_angle)
-                
-                # Offset position toward the bisector to smoothly cut the corner
-                offset = corner_cut_radius * cut_factor
-                curr_x = base_x + offset * math.cos(bisector_rad)
-                curr_y = base_y + offset * math.sin(bisector_rad)
-            
-            # Determine which angle to turn toward - only if angle difference is significant
-            if dist_to_next_node <= turn_zone_distance and has_next_segment and abs(angle_diff_to_next) > 5:
-                # Within turn zone - start turning toward next segment
-                turn_target = next_segment_angle
+            # Determine turn target based on distance to node and next segment
+            # Smoothly blend between current segment angle and next segment angle
+            if has_next_segment and dist_to_next_node <= turn_zone_distance and abs(angle_diff_to_next) > 3:
+                # Calculate blend factor (0 = far from node, 1 = at node)
+                blend = 1.0 - (dist_to_next_node / turn_zone_distance)
+                # Smooth the blend with ease-in-out
+                blend = blend * blend * (3.0 - 2.0 * blend)
+                # Interpolate between current and next segment angle
+                turn_target = target_angle + (angle_diff_to_next * blend)
             else:
                 # Outside turn zone - face current segment direction
                 turn_target = target_angle
             
-            # Gradually adjust heading toward turn target (tricycle steering)
+            # Gradually adjust heading toward turn target
             heading = aircraft_info['heading']
             angle_diff = turn_target - heading
             
@@ -780,7 +770,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
             while angle_diff < -180:
                 angle_diff += 360
             
-            # Apply limited turn rate (tricycle steering)
+            # Apply smooth limited turn rate
             if abs(angle_diff) > max_turn_per_step:
                 heading += max_turn_per_step if angle_diff > 0 else -max_turn_per_step
             else:
@@ -788,19 +778,13 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
             
             aircraft_info['heading'] = heading
             
-            # Calculate position of main landing gear (rear wheels)
-            # The main gear is behind the nose by the wheelbase distance
+            # Update aircraft triangle
             angle_rad = math.radians(heading)
-            rear_x = curr_x - wheelbase * math.cos(angle_rad)
-            rear_y = curr_y - wheelbase * math.sin(angle_rad)
-            
-            # For tricycle steering, the triangle should pivot around the rear position
-            # The nose is at curr_x, curr_y and the body extends back from there
             size = 12
             
-            # Define triangle with nose at origin, body extending backward
+            # Define triangle with nose at origin
             base_points = [
-                (0, 0),              # Nose (front wheel at path position)
+                (0, 0),              # Nose
                 (-2*size, -size),    # Upper rear
                 (-2*size, size)      # Lower rear
             ]
@@ -822,7 +806,6 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=5):
             canvas.coords(aircraft_info['label_id'], curr_x, curr_y - size - 10)
             
             aircraft_info['position'] = (curr_x, curr_y)
-            aircraft_info['rear_position'] = (rear_x, rear_y)  # Track rear for reference
             
             # Schedule next step
             app.after(adjust_delay(50), animate_segment, step + 1)
@@ -916,7 +899,7 @@ def is_arrival_within_5_5nm():
     return False
 
 def is_arrival_within_5nm():
-    """Check if any arrival is within 5nm (5 nodes) of the runway center (0m9/0m27)."""
+    """Check if any arrival is within 3nm (3 nodes) of the runway center (0m9/0m27)."""
     center_idx_09 = RUNWAY_TICK_NODES.index("0m9")
     center_idx_27 = RUNWAY_TICK_NODES.index("0m27")
 
@@ -927,7 +910,7 @@ def is_arrival_within_5nm():
             if idx is not None:
                 dist_09 = abs(idx - center_idx_09)
                 dist_27 = abs(idx - center_idx_27)
-                if min(dist_09, dist_27) <= 5:
+                if min(dist_09, dist_27) <= 3:
                     return True
     return False
 
@@ -990,15 +973,14 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
     # Enforce departure separation (1 or 2 minutes, scaled by sim speed)
     next_departure_release_time = time.time() + (random.choice([60, 120]) / simulation_speed)
 
-    # Takeoff parameters
-    initial_speed = 5  # Starting speed (pixels per frame)
-    final_speed = 20   # Speed at rotation/liftoff (pixels per frame)
+    # Takeoff parameters - 45 second takeoff with gradual acceleration from taxi speed
+    initial_speed = 0.22  # Starting speed - same as taxi speed (pixels per frame)
+    final_speed = 2.21   # Speed at rotation/liftoff (pixels per frame) - targets 45sec for ~1820px runways
     acceleration_distance = total_distance * 0.8  # Accelerate for 80% of runway
     max_turn_per_step = 8.0  # Same as taxi turning rate for consistency
     
-    # Total steps based on average speed
-    avg_speed = (initial_speed + final_speed) / 2
-    total_steps = int(total_distance / avg_speed)
+    # Total steps to achieve ~45 second takeoff duration (1500 steps * 30ms = 45 seconds)
+    total_steps = 1500
     
     # Track if we've moved to airborne status
     moved_to_airborne = [False]
@@ -1213,7 +1195,7 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
         is_decelerating = route_idx <= runway_exit_idx
         
         # Calculate number of steps
-        avg_speed = (20 + 5) / 2  # Average between landing and taxi speed
+        avg_speed = (1.6 + 0.22) / 2  # Average between landing and taxi speed (50 second landing)
         steps = max(int(distance / avg_speed), 1)
         
         # Calculate look-ahead angle for smooth turning
@@ -1263,22 +1245,30 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 move_aircraft_status(aircraft_info['callsign'], 'Taxiing')
                 moved_to_taxiing[0] = True
             
-            # Calculate current speed with smooth deceleration
+            # Calculate current speed with smooth deceleration (50 seconds total from spawn to taxi speed)
             if is_decelerating:
                 # Use pre-calculated total deceleration distance
                 decel_total_distance = aircraft_info.get('decel_total_distance', 1000)
                 decel_distance_traveled = aircraft_info.get('decel_distance_traveled', 0.0)
                 
-                # Complete deceleration at 70% of the distance so aircraft reaches taxi speed before exit
-                # Progress across decel zone (0 → 1), but reaches 1.0 at 70% of total distance
-                decel_progress = min(1.0, decel_distance_traveled / max(decel_total_distance * 0.7, 1))
-                
-                # Cubic easing for smooth deceleration: 20 → 5 px/frame
-                ease = decel_progress * decel_progress * decel_progress
-                current_speed = 20 - (15 * ease)
+                # Maintain constant speed for first 25% of runway, then decelerate
+                if decel_distance_traveled < decel_total_distance * 0.25:
+                    # Constant landing speed for first 25%
+                    current_speed = 1.6
+                else:
+                    # Calculate deceleration progress starting after 25% point
+                    adjusted_distance = decel_distance_traveled - (decel_total_distance * 0.25)
+                    adjusted_total = decel_total_distance * 0.75  # Remaining distance for deceleration
+                    
+                    # Complete deceleration at 90% of remaining distance
+                    decel_progress = min(1.0, adjusted_distance / max(adjusted_total * 0.9, 1))
+                    
+                    # Cubic easing for smooth deceleration: 1.6 → 0.22 px/frame
+                    ease = decel_progress * decel_progress * decel_progress
+                    current_speed = 1.6 - (1.38 * ease)
             else:
                 # Constant taxi speed after runway exit
-                current_speed = 5
+                current_speed = 0.22
             
             # Move along segment by actual distance this frame
             if distance > 0:
@@ -1532,7 +1522,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
         
         # Calculate distance and steps
         distance = math.hypot(end_x - start_x, end_y - start_y)
-        steps = max(int(distance / 5), 1)  # speed = 5
+        steps = max(int(distance / 0.24), 1)  # speed = 0.24 (same as departing aircraft)
         step_x = (end_x - start_x) / steps
         step_y = (end_y - start_y) / steps
         
@@ -1554,11 +1544,9 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
             next_segment_angle = math.degrees(math.atan2(next_end_y - end_y, next_end_x - end_x))
             has_next_segment = True
         
-        # Turn parameters
-        turn_zone_distance = 10
-        max_turn_per_step = 8.0
-        wheelbase = 40
-        corner_cut_radius = 10
+        # Turn parameters (simplified for smooth animation at 0.22 px/frame)
+        turn_zone_distance = 30  # Start turning 30 pixels before node
+        max_turn_per_step = 1.5  # Gradual turn rate (degrees per step)
         
         def animate_segment(step=0):
             if step >= steps:
@@ -1569,12 +1557,12 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
                 move_to_next_node()
                 return
             
-            # Calculate base position on straight line
-            base_x = start_x + (step_x * step)
-            base_y = start_y + (step_y * step)
+            # Calculate position on straight line path
+            curr_x = start_x + (step_x * step)
+            curr_y = start_y + (step_y * step)
             
             # Calculate distance to next node
-            dist_to_next_node = math.hypot(end_x - base_x, end_y - base_y)
+            dist_to_next_node = math.hypot(end_x - curr_x, end_y - curr_y)
             
             # Calculate angle difference to next segment
             angle_diff_to_next = 0
@@ -1585,28 +1573,20 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
                 while angle_diff_to_next < -180:
                     angle_diff_to_next += 360
             
-            # Apply smooth corner cutting
-            curr_x = base_x
-            curr_y = base_y
-            
-            if has_next_segment and dist_to_next_node <= turn_zone_distance and abs(angle_diff_to_next) > 5:
-                linear_factor = 1.0 - (dist_to_next_node / turn_zone_distance)
-                cut_factor = linear_factor * linear_factor * linear_factor
-                
-                bisector_angle = target_angle + (angle_diff_to_next * 0.5)
-                bisector_rad = math.radians(bisector_angle)
-                
-                offset = corner_cut_radius * cut_factor
-                curr_x = base_x + offset * math.cos(bisector_rad)
-                curr_y = base_y + offset * math.sin(bisector_rad)
-            
-            # Determine turn target
-            if dist_to_next_node <= turn_zone_distance and has_next_segment and abs(angle_diff_to_next) > 5:
-                turn_target = next_segment_angle
+            # Determine turn target based on distance to node and next segment
+            # Smoothly blend between current segment angle and next segment angle
+            if has_next_segment and dist_to_next_node <= turn_zone_distance and abs(angle_diff_to_next) > 3:
+                # Calculate blend factor (0 = far from node, 1 = at node)
+                blend = 1.0 - (dist_to_next_node / turn_zone_distance)
+                # Smooth the blend with ease-in-out
+                blend = blend * blend * (3.0 - 2.0 * blend)
+                # Interpolate between current and next segment angle
+                turn_target = target_angle + (angle_diff_to_next * blend)
             else:
+                # Outside turn zone - face current segment direction
                 turn_target = target_angle
             
-            # Adjust heading
+            # Gradually adjust heading toward turn target
             heading = aircraft_info['heading']
             angle_diff = turn_target - heading
             
