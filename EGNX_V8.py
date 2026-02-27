@@ -197,6 +197,191 @@ def build_spline_path(route, points_per_segment=20):
 
     return spline_points, spline_route_idx_map
 
+def build_taxi_segment_points(route, route_idx, speed=0.24, min_points=12, start_override=None, corner_cut=10.0):
+    """Build points for a taxi segment: straight edge with optional rounded corner near the end.
+
+    Returns (points, next_start_override), where next_start_override is a point on the next
+    segment if this segment rounds a corner (used to avoid snapping back to the node).
+    """
+    if route_idx < 0 or route_idx + 1 >= len(route):
+        return [], None
+
+    def _line_points(p0, p1, spacing):
+        d = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
+        if d < 1e-6:
+            return [p0]
+        n = max(int(d / max(0.01, spacing)), 1)
+        pts = []
+        for i in range(n):
+            t = i / n
+            x = p0[0] + (p1[0] - p0[0]) * t
+            y = p0[1] + (p1[1] - p0[1]) * t
+            pts.append((x, y))
+        pts.append(p1)
+        return pts
+
+    def _quad_points(p0, c, p1, spacing):
+        approx_len = math.hypot(c[0] - p0[0], c[1] - p0[1]) + math.hypot(p1[0] - c[0], p1[1] - c[1])
+        n = max(int(approx_len / max(0.01, spacing)), 12)
+        pts = []
+        for i in range(1, n + 1):
+            t = i / n
+            omt = 1.0 - t
+            x = omt * omt * p0[0] + 2.0 * omt * t * c[0] + t * t * p1[0]
+            y = omt * omt * p0[1] + 2.0 * omt * t * c[1] + t * t * p1[1]
+            pts.append((x, y))
+        return pts
+
+    a = start_override if start_override is not None else nodes[route[route_idx]]
+    b = nodes[route[route_idx + 1]]
+
+    can_round = route_idx + 2 < len(route)
+    if not can_round:
+        pts = _line_points(a, b, speed)
+        if len(pts) < min_points and len(pts) >= 2:
+            pts = _line_points(a, b, max(0.01, speed * len(pts) / min_points))
+        return pts, None
+
+    c = nodes[route[route_idx + 2]]
+
+    # Keep exact node crossing at hold points for procedural behavior.
+    if route[route_idx + 1].endswith('_HOLD'):
+        pts = _line_points(a, b, speed)
+        if len(pts) < min_points and len(pts) >= 2:
+            pts = _line_points(a, b, max(0.01, speed * len(pts) / min_points))
+        return pts, None
+
+    v1x, v1y = (b[0] - a[0], b[1] - a[1])
+    v2x, v2y = (c[0] - b[0], c[1] - b[1])
+    len1 = math.hypot(v1x, v1y)
+    len2 = math.hypot(v2x, v2y)
+    if len1 < 1e-6 or len2 < 1e-6:
+        pts = _line_points(a, b, speed)
+        if len(pts) < min_points and len(pts) >= 2:
+            pts = _line_points(a, b, max(0.01, speed * len(pts) / min_points))
+        return pts, None
+
+    u1x, u1y = (v1x / len1, v1y / len1)
+    u2x, u2y = (v2x / len2, v2y / len2)
+    dot = max(-1.0, min(1.0, u1x * u2x + u1y * u2y))
+    turn_angle_deg = math.degrees(math.acos(dot))
+
+    # Keep straight segments straight unless there is a meaningful corner.
+    if turn_angle_deg < 8.0:
+        pts = _line_points(a, b, speed)
+        if len(pts) < min_points and len(pts) >= 2:
+            pts = _line_points(a, b, max(0.01, speed * len(pts) / min_points))
+        return pts, None
+
+    # Compute an inner fillet arc between the two segments so the nose "cuts" the corner.
+    # Interpret `corner_cut` as a desired fillet radius (pixels). Compute tangent points
+    # along each segment and build a circular arc between them. Fall back to the
+    # previous quadratic-bezier approach if geometry fails.
+    # Increase fillet radius (scale requested corner_cut) and allow larger
+    # fraction of adjacent segment lengths so the nose cuts corners more aggressively.
+    radius = min(corner_cut * 1.6, len1 * 0.5, len2 * 0.5)
+
+    # Angle between incoming and outgoing vectors (in radians)
+    dot = max(-1.0, min(1.0, u1x * u2x + u1y * u2y))
+    beta = math.acos(dot)  # angle between u1 and u2
+
+    # If nearly straight, don't round
+    if beta < math.radians(8.0):
+        pts = _line_points(a, b, speed)
+        if len(pts) < min_points and len(pts) >= 2:
+            pts = _line_points(a, b, max(0.01, speed * len(pts) / min_points))
+        return pts, None
+
+    # Distance from node along each segment to tangent points for a fillet of radius r
+    try:
+        d = radius * math.tan(beta / 2.0)
+    except Exception:
+        d = radius * 0.5
+
+    # Ensure d isn't longer than available segment lengths
+    d = min(d, len1 * 0.5, len2 * 0.5)
+
+    in_pt = (b[0] - u1x * d, b[1] - u1y * d)
+    out_pt = (b[0] + u2x * d, b[1] + u2y * d)
+
+    # Compute circle center candidates: center must be at distance `radius` from both tangent points
+    # and the vector from center to each tangent point must be perpendicular to the segment direction.
+    def _norm(vx, vy):
+        nl = math.hypot(vx, vy)
+        if nl == 0:
+            return (0.0, 0.0)
+        return (vx / nl, vy / nl)
+
+    # normals perpendicular to directions u1 and u2
+    n1a = (-u1y, u1x)
+    n1b = (u1y, -u1x)
+    n2a = (-u2y, u2x)
+    n2b = (u2y, -u2x)
+
+    candidates = []
+    for n1 in (n1a, n1b):
+        for n2 in (n2a, n2b):
+            c1 = (in_pt[0] + n1[0] * radius, in_pt[1] + n1[1] * radius)
+            c2 = (out_pt[0] + n2[0] * radius, out_pt[1] + n2[1] * radius)
+            # If these are close they represent the same center (signs chosen correctly)
+            if math.hypot(c1[0] - c2[0], c1[1] - c2[1]) < 1.0:
+                candidates.append(((c1[0] + c2[0]) / 2.0, (c1[1] + c2[1]) / 2.0))
+
+    points = _line_points(a, in_pt, speed)
+
+    if candidates:
+        cx, cy = candidates[0]
+        ang0 = math.atan2(in_pt[1] - cy, in_pt[0] - cx)
+        ang1 = math.atan2(out_pt[1] - cy, out_pt[0] - cx)
+
+        # Determine sweep direction that follows the path from in_pt -> out_pt
+        # Compute cross product of u1 and u2 to choose direction
+        cross = u1x * u2y - u1y * u2x
+        # Normalize angles to [0, 2pi)
+        def _norm_ang(a):
+            while a < 0:
+                a += 2 * math.pi
+            while a >= 2 * math.pi:
+                a -= 2 * math.pi
+            return a
+
+        a0 = _norm_ang(ang0)
+        a1 = _norm_ang(ang1)
+
+        if cross < 0:
+            # clockwise rotation
+            if a1 > a0:
+                a1 -= 2 * math.pi
+            arc_len = abs(a0 - a1) * radius
+            n = max(int(arc_len / max(0.01, speed)), 12)
+            for i in range(1, n + 1):
+                t = i / n
+                ang = a0 + (a1 - a0) * t
+                x = cx + math.cos(ang) * radius
+                y = cy + math.sin(ang) * radius
+                points.append((x, y))
+        else:
+            # counter-clockwise rotation
+            if a1 < a0:
+                a1 += 2 * math.pi
+            arc_len = abs(a1 - a0) * radius
+            n = max(int(arc_len / max(0.01, speed)), 12)
+            for i in range(1, n + 1):
+                t = i / n
+                ang = a0 + (a1 - a0) * t
+                x = cx + math.cos(ang) * radius
+                y = cy + math.sin(ang) * radius
+                points.append((x, y))
+    else:
+        # Fallback: use previous quadratic approach if fillet center couldn't be computed
+        points.extend(_quad_points(in_pt, b, out_pt, speed))
+
+    if len(points) < min_points and len(points) >= 2:
+        points = _line_points(a, in_pt, max(0.01, speed * len(points) / min_points))
+        points.extend(_quad_points(in_pt, b, out_pt, max(0.01, speed * len(points) / min_points)))
+
+    return points, out_pt
+
 def nearest_node_to(x, y, max_dist=50):
     """Return the node name nearest to (x,y) within max_dist pixels, else None."""
     best = None
@@ -254,7 +439,7 @@ def adjust_delay(base_delay_ms):
 # GRAPH DRAW FUNCTION
 def draw_graph(canvas):
     """Draw nodes and edges on the canvas."""
-    global graph_element_ids
+    global graph_element_ids, graph_visible
     
     # Clear existing graph element IDs
     graph_element_ids = []
@@ -291,7 +476,9 @@ def draw_graph(canvas):
     # Draw nodes (circles) on top
     for name, (x, y) in nodes.items():
         oval_id = canvas.create_oval(x-3, y-3, x+3, y+3, fill="red")
-        text_id = canvas.create_text(x, y-10, text=name, fill="white", font=("Arial", 7, "bold"))
+        # Position label below the node when graph visibility is ON, otherwise above
+        label_y = y + 10 if graph_visible else y - 10
+        text_id = canvas.create_text(x, label_y, text=name, fill="white", font=("Arial", 7, "bold"))
         graph_element_ids.append(oval_id)
         graph_element_ids.append(text_id)
 
@@ -316,10 +503,9 @@ def toggle_graph_visibility():
 # ==============================
 # STOP BARS
 # Manual pixel coordinates for stop bar lights at each hold point
-# Format: "HOLD_NAME": {"red": [(x1,y1), (x2,y2), ...], "green": [(x1,y1), (x2,y2), ...]}
 STOP_BAR_POSITIONS = {
     "A1_HOLD": {
-        "red": [(1810, 120), (1815, 120), (1820, 120), (1825, 120), (1830, 120), (1835, 120)],  # Add 6 red light positions here: [(x1,y1), (x2,y2), (x3,y3), (x4,y4), (x5,y5), (x6,y6)] 
+        "red": [(1810, 120), (1815, 120), (1820, 120), (1825, 120), (1830, 120), (1835, 120)], 
     },
     "B1_HOLD": {
         "red": [(1548, 120), (1553, 120), (1558, 120), (1563, 120), (1568, 120)],
@@ -368,7 +554,7 @@ def draw_stop_bars(canvas):
         if node and node.endswith('_HOLD') and is_runway_clear() and not is_landing_aircraft and not arrival_too_close:
             # If this hold's stop bar isn't already off, turn it off now and set timer
             if (node not in stop_bar_off_until or current_time >= stop_bar_off_until[node]) and current_time >= next_departure_release_time:
-                stop_bar_duration = 1.2 / simulation_speed  # Adjust duration based on simulation speed
+                stop_bar_duration = 5.0 / simulation_speed
                 stop_bar_off_until[node] = current_time + stop_bar_duration
     
     for hold_name, positions in STOP_BAR_POSITIONS.items():
@@ -629,6 +815,26 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
     
     aircraft_info['route'] = route
     aircraft_info['route_index'] = 0
+    aircraft_info.pop('segment_start_override', None)
+    aircraft_info.pop('segment_start_override_idx', None)
+    if not aircraft_info.get('path_history'):
+        aircraft_info['path_history'] = [aircraft_info.get('position', nodes[current_node])]
+
+    def _rear_from_history(history, wheelbase):
+        if not history:
+            return nodes[current_node]
+        dist = 0.0
+        for i in range(len(history) - 1, 0, -1):
+            x1, y1 = history[i]
+            x0, y0 = history[i - 1]
+            seg = math.hypot(x1 - x0, y1 - y0)
+            if dist + seg >= wheelbase:
+                t = (wheelbase - dist) / seg if seg > 1e-6 else 0.0
+                rx = x1 + (x0 - x1) * t
+                ry = y1 + (y0 - y1) * t
+                return rx, ry
+            dist += seg
+        return history[0]
     
     def move_to_next_node():
         """Move aircraft to the next node in the route."""
@@ -693,105 +899,81 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
         start_x, start_y = nodes[current_node]
         end_x, end_y = nodes[next_node]
         
-        # Calculate distance and steps
-        distance = math.hypot(end_x - start_x, end_y - start_y)
-        steps = max(int(distance / speed), 1)
-        step_x = (end_x - start_x) / steps
-        step_y = (end_y - start_y) / steps
-        
-        # Calculate target angle for this segment
-        target_angle = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
-        
-        # Get current heading from aircraft info (or initialize to target angle)
+        start_override = None
+        if aircraft_info.get('segment_start_override_idx') == route_idx:
+            start_override = aircraft_info.get('segment_start_override')
+            aircraft_info.pop('segment_start_override_idx', None)
+            aircraft_info.pop('segment_start_override', None)
+
+        segment_points, next_start_override = build_taxi_segment_points(
+            route,
+            route_idx,
+            speed=speed,
+            start_override=start_override
+        )
+        if not segment_points:
+            segment_points = [nodes[current_node]]
+
+        if next_start_override is not None:
+            aircraft_info['segment_start_override'] = next_start_override
+            aircraft_info['segment_start_override_idx'] = route_idx + 1
+
+        steps = len(segment_points)
+        lookahead_points = 4
+        max_turn_per_step = 1.35
+
         if 'heading' not in aircraft_info:
-            aircraft_info['heading'] = target_angle
-        
-        current_heading = aircraft_info['heading']
-        
-        # Calculate look-ahead angle for next segment if it exists
-        next_segment_angle = target_angle
-        has_next_segment = False
-        if route_idx + 2 < len(route):
-            next_next_node = route[route_idx + 2]
-            next_end_x, next_end_y = nodes[next_next_node]
-            next_segment_angle = math.degrees(math.atan2(next_end_y - end_y, next_end_x - end_x))
-            has_next_segment = True
-        
-        # Turn parameters (simplified for smooth animation at 0.22 px/frame)
-        turn_zone_distance = 30  # Start turning 30 pixels before node
-        max_turn_per_step = 1.5  # Gradual turn rate (degrees per step)
+            if steps > 1:
+                x0, y0 = segment_points[0]
+                x1, y1 = segment_points[min(lookahead_points, steps - 1)]
+                aircraft_info['heading'] = math.degrees(math.atan2(y1 - y0, x1 - x0))
+            else:
+                aircraft_info['heading'] = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
         
         def animate_segment(step=0):
             if step >= steps:
                 # Reached next node, move to the next segment immediately without delay
                 aircraft_info['route_index'] = route_idx + 1
                 aircraft_info['node'] = next_node
-                aircraft_info['position'] = nodes[next_node]
+                aircraft_info['position'] = segment_points[-1]
                 # Continue immediately to next segment for smooth transition
                 move_to_next_node()
                 return
             
-            # Calculate position on straight line path
-            curr_x = start_x + (step_x * step)
-            curr_y = start_y + (step_y * step)
-            
-            # Calculate distance to next node
-            dist_to_next_node = math.hypot(end_x - curr_x, end_y - curr_y)
-            
-            # Calculate angle difference to next segment (if it exists)
-            angle_diff_to_next = 0
-            if has_next_segment:
-                angle_diff_to_next = next_segment_angle - target_angle
-                while angle_diff_to_next > 180:
-                    angle_diff_to_next -= 360
-                while angle_diff_to_next < -180:
-                    angle_diff_to_next += 360
-            
-            # Determine turn target based on distance to node and next segment
-            # Smoothly blend between current segment angle and next segment angle
-            if has_next_segment and dist_to_next_node <= turn_zone_distance and abs(angle_diff_to_next) > 3:
-                # Calculate blend factor (0 = far from node, 1 = at node)
-                blend = 1.0 - (dist_to_next_node / turn_zone_distance)
-                # Smooth the blend with ease-in-out
-                blend = blend * blend * (3.0 - 2.0 * blend)
-                # Interpolate between current and next segment angle
-                turn_target = target_angle + (angle_diff_to_next * blend)
+            curr_x, curr_y = segment_points[step]
+
+            if steps > 1:
+                look_idx = min(step + lookahead_points, steps - 1)
+                look_x, look_y = segment_points[look_idx]
+                turn_target = math.degrees(math.atan2(look_y - curr_y, look_x - curr_x))
             else:
-                # Outside turn zone - face current segment direction
-                turn_target = target_angle
+                turn_target = aircraft_info['heading']
             
-            # Gradually adjust heading toward turn target
-            heading = aircraft_info['heading']
-            angle_diff = turn_target - heading
-            
-            # Normalize angle difference to [-180, 180]
-            while angle_diff > 180:
-                angle_diff -= 360
-            while angle_diff < -180:
-                angle_diff += 360
-            
-            # Apply smooth limited turn rate
-            if abs(angle_diff) > max_turn_per_step:
-                heading += max_turn_per_step if angle_diff > 0 else -max_turn_per_step
-            else:
-                heading = turn_target
-            
-            aircraft_info['heading'] = heading
-            
-            # Update aircraft triangle
-            angle_rad = math.radians(heading)
+            # Compute rear position from overall taxi history so turns stay smooth across segments.
             size = 12
-            
-            # Define triangle with nose at origin
+            wheelbase = 2 * size
+            history = aircraft_info.setdefault('path_history', [])
+            if not history:
+                history.append(segment_points[0])
+            rear_x, rear_y = _rear_from_history(history, wheelbase)
+
+            aircraft_info['rear_pos'] = (rear_x, rear_y)
+
+            # Compute heading from rear->nose so the whole aircraft aligns with path
+            heading = math.degrees(math.atan2(curr_y - rear_y, curr_x - rear_x))
+            aircraft_info['heading'] = heading
+
+            # Update aircraft triangle rotated about the nose point
+            angle_rad = math.radians(heading)
             base_points = [
                 (0, 0),              # Nose
-                (-2*size, -size),    # Upper rear
-                (-2*size, size)      # Lower rear
+                (-wheelbase, -size), # Upper rear
+                (-wheelbase, size)   # Lower rear
             ]
-            
+
             cos_a = math.cos(angle_rad)
             sin_a = math.sin(angle_rad)
-            
+
             rotated_points = []
             for px, py in base_points:
                 rx = px * cos_a - py * sin_a
@@ -806,6 +988,9 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
             canvas.coords(aircraft_info['label_id'], curr_x, curr_y - size - 10)
             
             aircraft_info['position'] = (curr_x, curr_y)
+            history.append((curr_x, curr_y))
+            if len(history) > 400:
+                del history[:-300]
             
             # Schedule next step
             app.after(adjust_delay(50), animate_segment, step + 1)
@@ -1111,6 +1296,8 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
     
     aircraft_info['route'] = route
     aircraft_info['route_index'] = 0
+    aircraft_info.pop('segment_start_override', None)
+    aircraft_info.pop('segment_start_override_idx', None)
     aircraft_info['deceleration_start'] = deceleration_start
     
     # Pre-calculate total deceleration distance for smooth global speed control
@@ -1353,19 +1540,64 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
             
             aircraft_info['heading'] = heading
             
-            # Update aircraft triangle
+            # Maintain a short history of nose positions so we can sample the exact
+            # path the nose took and place the rear a fixed `wheelbase` distance
+            # behind it. This makes the rear follow the nose path precisely.
+            wheelbase = 24  # pixels (2 * 12)
+            history = aircraft_info.get('nose_history')
+            if history is None:
+                history = []
+                aircraft_info['nose_history'] = history
+
+            # Append current nose point with cumulative distance
+            if not history:
+                history.append((curr_x, curr_y, 0.0))
+            else:
+                lx, ly, lc = history[-1]
+                dist = math.hypot(curr_x - lx, curr_y - ly)
+                history.append((curr_x, curr_y, lc + dist))
+
+            # Trim history to reasonable length (keep last 2000 px of path)
+            while len(history) > 2 and (history[-1][2] - history[0][2]) > 2000:
+                history.pop(0)
+
+            # Desired cumulative distance for rear point
+            curr_cum = history[-1][2]
+            target_cum = max(0.0, curr_cum - wheelbase)
+
+            # Find sample in history
+            rear_x = history[0][0]
+            rear_y = history[0][1]
+            for i in range(len(history)-1, 0, -1):
+                x1, y1, c1 = history[i-1]
+                x2, y2, c2 = history[i]
+                if c1 <= target_cum <= c2:
+                    t = (target_cum - c1) / (c2 - c1) if c2 > c1 else 0.0
+                    rear_x = x1 + (x2 - x1) * t
+                    rear_y = y1 + (y2 - y1) * t
+                    break
+
+            # Smooth rear position slightly to avoid jitter at segment boundaries
+            prev_rear = aircraft_info.get('rear_pos', (rear_x, rear_y))
+            smooth_factor = 0.7
+            rear_x = prev_rear[0] + (rear_x - prev_rear[0]) * smooth_factor
+            rear_y = prev_rear[1] + (rear_y - prev_rear[1]) * smooth_factor
+            aircraft_info['rear_pos'] = (rear_x, rear_y)
+
+            # Compute heading from rear->nose so the whole aircraft aligns with path
+            heading = math.degrees(math.atan2(curr_y - rear_y, curr_x - rear_x))
+            aircraft_info['heading'] = heading
+
+            # Draw triangle using computed heading
             angle_rad = math.radians(heading)
             size = 12
-            
             base_points = [
                 (0, 0),
                 (-2*size, -size),
                 (-2*size, size)
             ]
-            
             cos_a = math.cos(angle_rad)
             sin_a = math.sin(angle_rad)
-            
             rotated_points = []
             for px, py in base_points:
                 rx = px * cos_a - py * sin_a
@@ -1375,10 +1607,10 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
             if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
                 app.after(adjust_delay(200), animate_segment, step)
                 return
-            
+
             canvas.coords(aircraft_info['triangle_id'], *rotated_points)
             canvas.coords(aircraft_info['label_id'], curr_x, curr_y - size - 10)
-            
+
             aircraft_info['position'] = (curr_x, curr_y)
             
             # Schedule next step
@@ -1469,6 +1701,24 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
     
     aircraft_info['route'] = route
     aircraft_info['route_index'] = 0
+    if not aircraft_info.get('path_history'):
+        aircraft_info['path_history'] = [aircraft_info.get('position', nodes[current_node])]
+
+    def _rear_from_history(history, wheelbase):
+        if not history:
+            return nodes[current_node]
+        dist = 0.0
+        for i in range(len(history) - 1, 0, -1):
+            x1, y1 = history[i]
+            x0, y0 = history[i - 1]
+            seg = math.hypot(x1 - x0, y1 - y0)
+            if dist + seg >= wheelbase:
+                t = (wheelbase - dist) / seg if seg > 1e-6 else 0.0
+                rx = x1 + (x0 - x1) * t
+                ry = y1 + (y0 - y1) * t
+                return rx, ry
+            dist += seg
+        return history[0]
     
     def move_to_next_node():
         """Move aircraft to the next node in the route."""
@@ -1520,71 +1770,54 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
         start_x, start_y = nodes[current_node]
         end_x, end_y = nodes[next_node]
         
-        # Calculate distance and steps
-        distance = math.hypot(end_x - start_x, end_y - start_y)
-        steps = max(int(distance / 0.24), 1)  # speed = 0.24 (same as departing aircraft)
-        step_x = (end_x - start_x) / steps
-        step_y = (end_y - start_y) / steps
-        
-        # Calculate target angle for this segment
-        target_angle = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
-        
-        # Get current heading from aircraft info (or initialize to target angle)
+        start_override = None
+        if aircraft_info.get('segment_start_override_idx') == route_idx:
+            start_override = aircraft_info.get('segment_start_override')
+            aircraft_info.pop('segment_start_override_idx', None)
+            aircraft_info.pop('segment_start_override', None)
+
+        segment_points, next_start_override = build_taxi_segment_points(
+            route,
+            route_idx,
+            speed=0.24,
+            start_override=start_override
+        )
+        if not segment_points:
+            segment_points = [nodes[current_node]]
+
+        if next_start_override is not None:
+            aircraft_info['segment_start_override'] = next_start_override
+            aircraft_info['segment_start_override_idx'] = route_idx + 1
+
+        steps = len(segment_points)
+        lookahead_points = 4
+        max_turn_per_step = 1.35
+
         if 'heading' not in aircraft_info:
-            aircraft_info['heading'] = target_angle
-        
-        current_heading = aircraft_info['heading']
-        
-        # Calculate look-ahead angle for next segment if it exists
-        next_segment_angle = target_angle
-        has_next_segment = False
-        if route_idx + 2 < len(route):
-            next_next_node = route[route_idx + 2]
-            next_end_x, next_end_y = nodes[next_next_node]
-            next_segment_angle = math.degrees(math.atan2(next_end_y - end_y, next_end_x - end_x))
-            has_next_segment = True
-        
-        # Turn parameters (simplified for smooth animation at 0.22 px/frame)
-        turn_zone_distance = 30  # Start turning 30 pixels before node
-        max_turn_per_step = 1.5  # Gradual turn rate (degrees per step)
+            if steps > 1:
+                x0, y0 = segment_points[0]
+                x1, y1 = segment_points[min(lookahead_points, steps - 1)]
+                aircraft_info['heading'] = math.degrees(math.atan2(y1 - y0, x1 - x0))
+            else:
+                aircraft_info['heading'] = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
         
         def animate_segment(step=0):
             if step >= steps:
                 # Reached next node, move to the next segment
                 aircraft_info['route_index'] = route_idx + 1
                 aircraft_info['node'] = next_node
-                aircraft_info['position'] = nodes[next_node]
+                aircraft_info['position'] = segment_points[-1]
                 move_to_next_node()
                 return
             
-            # Calculate position on straight line path
-            curr_x = start_x + (step_x * step)
-            curr_y = start_y + (step_y * step)
-            
-            # Calculate distance to next node
-            dist_to_next_node = math.hypot(end_x - curr_x, end_y - curr_y)
-            
-            # Calculate angle difference to next segment
-            angle_diff_to_next = 0
-            if has_next_segment:
-                angle_diff_to_next = next_segment_angle - target_angle
-                while angle_diff_to_next > 180:
-                    angle_diff_to_next -= 360
-                while angle_diff_to_next < -180:
-                    angle_diff_to_next += 360
-            
-            # Determine turn target based on distance to node and next segment
-            # Smoothly blend between current segment angle and next segment angle
-            if has_next_segment and dist_to_next_node <= turn_zone_distance and abs(angle_diff_to_next) > 3:
-                # Calculate blend factor (0 = far from node, 1 = at node)
-                blend = 1.0 - (dist_to_next_node / turn_zone_distance)
-                # Smooth the blend with ease-in-out
-                blend = blend * blend * (3.0 - 2.0 * blend)
-                # Interpolate between current and next segment angle
-                turn_target = target_angle + (angle_diff_to_next * blend)
+            curr_x, curr_y = segment_points[step]
+
+            if steps > 1:
+                look_idx = min(step + lookahead_points, steps - 1)
+                look_x, look_y = segment_points[look_idx]
+                turn_target = math.degrees(math.atan2(look_y - curr_y, look_x - curr_x))
             else:
-                # Outside turn zone - face current segment direction
-                turn_target = target_angle
+                turn_target = aircraft_info['heading']
             
             # Gradually adjust heading toward turn target
             heading = aircraft_info['heading']
@@ -1602,19 +1835,28 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
             
             aircraft_info['heading'] = heading
             
-            # Update aircraft triangle
-            angle_rad = math.radians(heading)
+            # Compute rear position from overall taxi history so turns stay consistent.
             size = 12
-            
+            wheelbase = 2 * size
+            history = aircraft_info.setdefault('path_history', [])
+            if not history:
+                history.append(segment_points[0])
+            rear_x, rear_y = _rear_from_history(history, wheelbase)
+            aircraft_info['rear_pos'] = (rear_x, rear_y)
+
+            # Compute heading from rear->nose
+            heading = math.degrees(math.atan2(curr_y - rear_y, curr_x - rear_x))
+            aircraft_info['heading'] = heading
+
+            # Draw triangle
+            angle_rad = math.radians(heading)
             base_points = [
                 (0, 0),
                 (-2*size, -size),
                 (-2*size, size)
             ]
-            
             cos_a = math.cos(angle_rad)
             sin_a = math.sin(angle_rad)
-            
             rotated_points = []
             for px, py in base_points:
                 rx = px * cos_a - py * sin_a
@@ -1624,11 +1866,14 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
             if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
                 app.after(adjust_delay(200), animate_segment, step)
                 return
-            
+
             canvas.coords(aircraft_info['triangle_id'], *rotated_points)
             canvas.coords(aircraft_info['label_id'], curr_x, curr_y - size - 10)
-            
+
             aircraft_info['position'] = (curr_x, curr_y)
+            history.append((curr_x, curr_y))
+            if len(history) > 400:
+                del history[:-300]
             
             # Schedule next step
             app.after(adjust_delay(50), animate_segment, step + 1)
@@ -2090,7 +2335,7 @@ def build_home_screen():
     run_btn.pack(pady=(0, 10))
     
     # Speed control - toggle button that cycles through speeds
-    speed_options = [1.0, 10.0]
+    speed_options = [1.0, 10.0, 50.0]
     speed_index = [0]  # Use list to allow modification in nested function
     speed_btn_ref = []  # Store reference to button for text updates
     
