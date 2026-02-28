@@ -2,6 +2,7 @@ from PIL import Image, ImageTk
 import warnings
 import math
 import heapq
+import time
 from tkinter import ttk
 import tkinter as tk
 import os
@@ -27,7 +28,26 @@ nodes = {
     "STAND3N": (937, 283), "STAND4N": (987, 283),
     "STAND5N": (1104, 283), "STAND6N": (1155, 283),
     "STAND7N": (1206, 283), "STAND8N": (1256, 283),
+    "STAND8N_2": (784, 283), "STAND8N": (1256, 283),
+    "STAND19N": (771,227), "STAND21N": (1320,227),
+    "STAND20N": (771, 288), "STAND22N": (1307, 283),
+    "STAND8A": (784, 348), "STAND8B": (784, 326),
+    "STAND9A": (835, 348), "STAND9B": (835, 326),
+    "STAND10A": (886, 348), "STAND10B": (886, 326),
+    "STAND11A": (937, 348), "STAND11B": (937, 326),
+    "STAND12A": (987, 348), "STAND12B": (987, 326),
+    "STAND13A": (1045, 348), "STAND13B": (1045, 326),
+    "STAND14A": (1104, 348), "STAND14B": (1104, 326),
+    "STAND15A": (1155, 348), "STAND15B": (1155, 326),
+    "STAND16A": (1206, 348), "STAND16B": (1206, 326),
+    "STAND17A": (1256, 348), "STAND17B": (1256, 326),
+    "STAND18A": (1307, 348), "STAND18B": (1307, 326),
+    "STAND19A": (708, 227), "STAND19B": (730, 227),
+    "STAND20A": (708, 288), "STAND20B": (730, 288),
+    "STAND22A": (1385, 288), "STAND22B": (1363, 288),
+    "STAND23A": (1385, 227), "STAND23B": (1363, 227),
     "AQ": (771, 158), "NQ": (771, 283),
+
     "AR": (1320, 158), "NR": (1320, 283),
     "AS": (1045, 158), "NS": (1045, 283),
     "TXY_A1": (1820, 158),"A1_HOLD": (1820, 120), "RWY27_A1": (1820, 70), "RWY27_A1_ALIGN": (1760, 70), "RWY09_AirBorne": (1920,70),
@@ -417,7 +437,8 @@ stop_bar_off_until = {}  # Track when each stop bar should turn back on (time-ba
 next_departure_release_time = 0.0  # Track when the next departure may be released (time-based)
 runway_protected = True  # Track if runway is protected (stop bars on)
 simulation_speed = 1.0  # Speed multiplier for simulation (1x, 10x)
-simulation_speed = 1.0  # Speed multiplier for simulation (1x, 10x)
+simulation_time_seconds = 0.0
+last_sim_real_time = time.perf_counter()
 main_canvas = None  # Global reference to the canvas
 status_columns = {}  # Global reference to status board columns
 aircraft_labels = {}  # Track labels in each status column
@@ -433,11 +454,24 @@ def adjust_delay(base_delay_ms):
     """Adjust a delay in milliseconds based on simulation speed multiplier."""
     return max(1, int(base_delay_ms / simulation_speed))
 
-# ==============================
-# SPEED CONTROL HELPER
-def adjust_delay(base_delay_ms):
-    """Adjust a delay in milliseconds based on simulation speed multiplier."""
-    return max(1, int(base_delay_ms / simulation_speed))
+def get_simulation_time():
+    """Return monotonically increasing simulation time in seconds.
+
+    Simulation time advances as real elapsed time multiplied by current simulation speed,
+    so changing the speed multiplier affects all clock-based timings immediately.
+    """
+    global simulation_time_seconds, last_sim_real_time
+    now = time.perf_counter()
+    elapsed_real = max(0.0, now - last_sim_real_time)
+    simulation_time_seconds += elapsed_real * simulation_speed
+    last_sim_real_time = now
+    return simulation_time_seconds
+
+def set_simulation_speed(new_speed):
+    """Update simulation speed while preserving continuous simulation time."""
+    global simulation_speed
+    get_simulation_time()
+    simulation_speed = new_speed
 
 # ==============================
 # GRAPH DRAW FUNCTION
@@ -533,7 +567,6 @@ def draw_stop_bars(canvas):
     Lights turn back on 2 seconds after turning off.
     """
     global stop_bar_draw_ids, stop_bar_off_until, next_departure_release_time
-    import time
     
     # Clear existing stop bars
     for items in stop_bar_draw_ids.values():
@@ -541,7 +574,7 @@ def draw_stop_bars(canvas):
             canvas.delete(item_id)
     stop_bar_draw_ids.clear()
     
-    current_time = time.time()
+    current_time = get_simulation_time()
     
     # Check which hold points have DEPARTING aircraft that should turn off the stop bar
     # Landing aircraft (with ignore_stop_bars flag) should NOT affect stop bars
@@ -558,7 +591,7 @@ def draw_stop_bars(canvas):
         if node and node.endswith('_HOLD') and is_runway_clear() and not is_landing_aircraft and not arrival_too_close:
             # If this hold's stop bar isn't already off, turn it off now and set timer
             if (node not in stop_bar_off_until or current_time >= stop_bar_off_until[node]) and current_time >= next_departure_release_time:
-                stop_bar_duration = 5.0 / simulation_speed
+                stop_bar_duration = 5.0
                 stop_bar_off_until[node] = current_time + stop_bar_duration
     
     for hold_name, positions in STOP_BAR_POSITIONS.items():
@@ -602,7 +635,7 @@ def continuous_stop_bar_update():
     if main_canvas:
         update_stop_bars(main_canvas)
     # Schedule next update
-    app.after(100, continuous_stop_bar_update)
+    app.after(adjust_delay(100), continuous_stop_bar_update)
 
 # ==============================
 # DRAW AIRCRAFT
@@ -874,6 +907,23 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
         # Get current and next node positions
         current_node = route[route_idx]
         next_node = route[route_idx + 1]
+
+        # Merge priority rule at AR: traffic from AS has priority over traffic from NR.
+        # If this aircraft is NR->AR, hold and retry until AS-priority conflict clears.
+        if current_node == "NR" and next_node == "AR":
+            if should_nr_yield_to_as_at_ar(aircraft_info['callsign']):
+                aircraft_info['waiting_for_merge_priority'] = True
+                app.after(adjust_delay(500), move_to_next_node)
+                return
+            aircraft_info['waiting_for_merge_priority'] = False
+        elif current_node == "NQ" and next_node == "AQ":
+            if should_nq_yield_to_as_at_aq(aircraft_info['callsign']):
+                aircraft_info['waiting_for_merge_priority'] = True
+                app.after(adjust_delay(500), move_to_next_node)
+                return
+            aircraft_info['waiting_for_merge_priority'] = False
+        else:
+            aircraft_info['waiting_for_merge_priority'] = False
         
         # Check if we're about to pass through a HOLD node (departing from it)
         # If so, check if runway is clear before proceeding
@@ -1349,7 +1399,6 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
     then disappears and moves to the Airborne status column.
     """
     import math
-    import time
     import random
     
     global next_departure_release_time
@@ -1371,7 +1420,7 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
         aircraft_info['heading'] = target_heading
     
     # Enforce departure separation (1 or 2 minutes, scaled by sim speed)
-    next_departure_release_time = time.time() + (random.choice([60, 120]) / simulation_speed)
+    next_departure_release_time = get_simulation_time() + random.choice([60, 120])
 
     # Takeoff parameters - 45 second takeoff with gradual acceleration from taxi speed
     initial_speed = 0.22  # Starting speed - same as taxi speed (pixels per frame)
@@ -1515,6 +1564,33 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
     aircraft_info.pop('segment_start_override_idx', None)
     aircraft_info['deceleration_start'] = deceleration_start
     
+    landing_frame_seconds = 0.03  # Matches app.after(adjust_delay(30), ...)
+    target_runway_landing_seconds = 50.0
+
+    def _base_landing_speed_for_distance(distance_traveled, total_distance):
+        """Base cubic landing speed profile in px/frame (before calibration scaling)."""
+        if total_distance <= 0:
+            return 0.22
+        if distance_traveled < total_distance * 0.25:
+            return 1.6
+        adjusted_distance = distance_traveled - (total_distance * 0.25)
+        adjusted_total = total_distance * 0.75
+        decel_progress = min(1.0, adjusted_distance / max(adjusted_total * 0.9, 1))
+        ease = decel_progress * decel_progress * decel_progress
+        return 1.6 - (1.38 * ease)
+
+    def _estimate_runway_landing_duration_seconds(total_distance):
+        """Numerically estimate 1x runway-landing duration using the cubic profile."""
+        if total_distance <= 0:
+            return 0.0
+        simulated_distance = 0.0
+        frame_count = 0
+        max_frames = 200000
+        while simulated_distance < total_distance and frame_count < max_frames:
+            simulated_distance += max(0.01, _base_landing_speed_for_distance(simulated_distance, total_distance))
+            frame_count += 1
+        return frame_count * landing_frame_seconds
+
     # Pre-calculate total deceleration distance for smooth global speed control
     try:
         # Decelerate from spawn (index 0) to the runway exit node
@@ -1533,11 +1609,18 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
         aircraft_info['decel_distance_traveled'] = 0.0
         aircraft_info['deceleration_start_idx'] = deceleration_start_idx
         aircraft_info['runway_exit_idx'] = runway_exit_idx
+
+        base_duration_s = _estimate_runway_landing_duration_seconds(decel_total_distance)
+        if base_duration_s > 0:
+            aircraft_info['landing_speed_scale'] = max(0.05, min(5.0, base_duration_s / target_runway_landing_seconds))
+        else:
+            aircraft_info['landing_speed_scale'] = 1.0
     except (ValueError, KeyError):
         aircraft_info['decel_total_distance'] = 1000
         aircraft_info['decel_distance_traveled'] = 0.0
         aircraft_info['deceleration_start_idx'] = 0
         aircraft_info['runway_exit_idx'] = len(route) - 1
+        aircraft_info['landing_speed_scale'] = 1.0
     
     # Track status changes
     moved_to_taxiing = [False]
@@ -1685,13 +1768,9 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
         current_node = route[route_idx]
         next_node = route[route_idx + 1]
 
-        runway_taxi_style_nodes = {
-            "RWY27_A1", "RWY09_E1", "RWY09_C1", "RWY27_B1",
-            "RWY27_A1_ALIGN", "RWY09_E1_ALIGN"
-        }
-        if current_node in runway_taxi_style_nodes or next_node in runway_taxi_style_nodes:
-            _animate_landing_taxi_style_segment(route_idx, current_node, next_node)
-            return
+        # Keep landing movement on the cubic distance-based profile so runway
+        # touchdown to exit takes ~50s at 1x and scales correctly with speed multiplier.
+        # (Taxi-style segment animation is intentionally not used for landing runway segments.)
         
         start_x, start_y = nodes[current_node]
         end_x, end_y = nodes[next_node]
@@ -1775,7 +1854,7 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 move_aircraft_status(aircraft_info['callsign'], 'Taxiing')
                 moved_to_taxiing[0] = True
             
-            # Calculate current speed with smooth deceleration (50 seconds total from spawn to taxi speed)
+            # Calculate current speed with smooth cubic deceleration calibrated to ~50s runway landing at 1x
             if is_decelerating:
                 # Use pre-calculated total deceleration distance
                 decel_total_distance = aircraft_info.get('decel_total_distance', 1000)
@@ -1796,6 +1875,8 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                     # Cubic easing for smooth deceleration: 1.6 → 0.22 px/frame
                     ease = decel_progress * decel_progress * decel_progress
                     current_speed = 1.6 - (1.38 * ease)
+
+                current_speed *= aircraft_info.get('landing_speed_scale', 1.0)
             else:
                 # Constant taxi speed after runway exit
                 current_speed = 0.22
@@ -2022,6 +2103,146 @@ def is_safe_to_move(callsign, next_x, next_y, min_distance=28):
             continue
         if math.hypot(other_pos[0] - next_x, other_pos[1] - next_y) < min_distance:
             return False
+    return True
+
+def should_nr_yield_to_as_at_ar(callsign, merge_clearance_px=55):
+    """Return True when NR->AR movement must yield to AS-priority traffic at AR merge."""
+    ar_pos = nodes.get("AR")
+    if not ar_pos:
+        return False
+
+    for other_callsign, info in active_aircraft.items():
+        if other_callsign == callsign:
+            continue
+
+        # Focus this rule on departures/taxiing aircraft.
+        other_status = aircraft_labels.get(other_callsign, {}).get('column')
+        if other_status not in {'Departures', 'Taxiing'}:
+            continue
+
+        other_node = info.get('node')
+        other_pos = info.get('position')
+        route = info.get('route') or []
+        route_idx = info.get('route_index', 0)
+        route_idx = max(0, min(route_idx, len(route) - 1)) if route else 0
+
+        # Immediate AS priority: aircraft at AS or actively on AS->AR segment.
+        if other_node == "AS":
+            return True
+        if route and route_idx < len(route) - 1 and route[route_idx] == "AS" and route[route_idx + 1] == "AR":
+            return True
+
+        # Keep NR waiting while merge area around AR is still occupied by aircraft
+        # coming from AS side.
+        if other_pos and math.hypot(other_pos[0] - ar_pos[0], other_pos[1] - ar_pos[1]) <= merge_clearance_px:
+            if other_node == "AR":
+                prev_node = route[route_idx - 1] if route and route_idx > 0 else None
+                if prev_node == "AS":
+                    return True
+            elif route:
+                upcoming = route[route_idx:route_idx + 3]
+                for i in range(len(upcoming) - 1):
+                    if upcoming[i] == "AS" and upcoming[i + 1] == "AR":
+                        return True
+
+    return False
+
+def should_nq_yield_to_as_at_aq(callsign, merge_clearance_px=55):
+    """Return True when NQ->AQ movement must yield to AS-priority traffic at AQ merge."""
+    aq_pos = nodes.get("AQ")
+    if not aq_pos:
+        return False
+
+    for other_callsign, info in active_aircraft.items():
+        if other_callsign == callsign:
+            continue
+
+        other_status = aircraft_labels.get(other_callsign, {}).get('column')
+        if other_status not in {'Departures', 'Taxiing'}:
+            continue
+
+        other_node = info.get('node')
+        other_pos = info.get('position')
+        route = info.get('route') or []
+        route_idx = info.get('route_index', 0)
+        route_idx = max(0, min(route_idx, len(route) - 1)) if route else 0
+
+        if other_node == "AS":
+            return True
+        if route and route_idx < len(route) - 1 and route[route_idx] == "AS" and route[route_idx + 1] == "AQ":
+            return True
+
+        if other_pos and math.hypot(other_pos[0] - aq_pos[0], other_pos[1] - aq_pos[1]) <= merge_clearance_px:
+            if other_node == "AQ":
+                prev_node = route[route_idx - 1] if route and route_idx > 0 else None
+                if prev_node == "AS":
+                    return True
+            elif route:
+                upcoming = route[route_idx:route_idx + 3]
+                for i in range(len(upcoming) - 1):
+                    if upcoming[i] == "AS" and upcoming[i + 1] == "AQ":
+                        return True
+
+    return False
+
+def _distance_point_to_segment(px, py, ax, ay, bx, by):
+    """Return (distance, t) from point P to line segment AB where t is projection factor on AB."""
+    abx = bx - ax
+    aby = by - ay
+    ab_len2 = abx * abx + aby * aby
+    if ab_len2 <= 1e-9:
+        return math.hypot(px - ax, py - ay), 0.0
+    t = ((px - ax) * abx + (py - ay) * aby) / ab_len2
+    t_clamped = max(0.0, min(1.0, t))
+    proj_x = ax + abx * t_clamped
+    proj_y = ay + aby * t_clamped
+    return math.hypot(px - proj_x, py - proj_y), t
+
+def is_pushback_path_clear(callsign, stand_node, target_node, corridor_half_width=30, node_clearance=40, route_lookahead=5):
+    """Return True if no aircraft is blocking or converging on the pushback path.
+
+    Checks:
+    - Aircraft physically behind/in the pushback corridor (stand -> standN)
+    - Aircraft already at/near standN where pushback exits
+    - Aircraft with upcoming taxi route steps that enter the same stand pushback nodes
+    """
+    if stand_node not in nodes or target_node not in nodes:
+        return True
+
+    sx, sy = nodes[stand_node]
+    tx, ty = nodes[target_node]
+
+    stand_b_node = f"{stand_node[:-1]}b" if stand_node.endswith("a") else None
+    conflict_nodes = {stand_node, target_node}
+    if stand_b_node and stand_b_node in nodes:
+        conflict_nodes.add(stand_b_node)
+    conflict_nodes.update(edges.get(target_node, []))
+
+    for other_callsign, info in active_aircraft.items():
+        if other_callsign == callsign:
+            continue
+
+        other_node = info.get('node')
+        other_pos = info.get('position')
+
+        if other_node in conflict_nodes:
+            return False
+
+        if other_pos:
+            dist_to_path, projection_t = _distance_point_to_segment(other_pos[0], other_pos[1], sx, sy, tx, ty)
+            if -0.35 <= projection_t <= 1.4 and dist_to_path <= corridor_half_width:
+                return False
+            if math.hypot(other_pos[0] - tx, other_pos[1] - ty) <= node_clearance:
+                return False
+
+        route = info.get('route') or []
+        if route:
+            route_idx = info.get('route_index', 0)
+            route_idx = max(0, min(route_idx, len(route) - 1))
+            upcoming_nodes = route[route_idx:route_idx + route_lookahead]
+            if any(node in conflict_nodes for node in upcoming_nodes):
+                return False
+
     return True
 
 def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
@@ -2578,6 +2799,12 @@ def build_home_screen():
                     app.after_cancel(turnaround_job_id)
                 except Exception:
                     pass
+            pushback_wait_job_id = ac_info.get('pushback_wait_job_id')
+            if pushback_wait_job_id:
+                try:
+                    app.after_cancel(pushback_wait_job_id)
+                except Exception:
+                    pass
             if 'radar_dot_id' in ac_info and ac_info['radar_dot_id']:
                 main_canvas.delete(ac_info['radar_dot_id'])
             if 'radar_label_id' in ac_info and ac_info['radar_label_id']:
@@ -2641,7 +2868,22 @@ def build_home_screen():
         else:
             add_aircraft_to_status(callsign, 'Departures')
 
-        app.after(adjust_delay(1000), lambda: pushback_aircraft(main_canvas, aircraft_info, stand_n_node, final_direction, runway_target=runway_target))
+        def attempt_pushback():
+            if callsign not in active_aircraft:
+                return
+            if aircraft_info.get('node') != stand_node:
+                return
+
+            if not is_pushback_path_clear(callsign, stand_node, stand_n_node):
+                aircraft_info['waiting_for_pushback_clearance'] = True
+                aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
+                return
+
+            aircraft_info['waiting_for_pushback_clearance'] = False
+            aircraft_info.pop('pushback_wait_job_id', None)
+            pushback_aircraft(main_canvas, aircraft_info, stand_n_node, final_direction, runway_target=runway_target)
+
+        aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
 
     def schedule_turnaround(aircraft_info, stand_node):
         """Schedule a turnaround so an arriving aircraft later departs."""
@@ -2886,9 +3128,8 @@ def build_home_screen():
     speed_btn_ref = []  # Store reference to button for text updates
     
     def cycle_speed():
-        global simulation_speed
         speed_index[0] = (speed_index[0] + 1) % len(speed_options)
-        simulation_speed = speed_options[speed_index[0]]
+        set_simulation_speed(speed_options[speed_index[0]])
         speed_btn_ref[0].configure(text=f"Speed: {speed_options[speed_index[0]]}x")
     
     speed_btn = ctk.CTkButton(
