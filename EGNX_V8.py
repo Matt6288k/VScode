@@ -28,9 +28,9 @@ nodes = {
     "STAND3N": (937, 283), "STAND4N": (987, 283),
     "STAND5N": (1104, 283), "STAND6N": (1155, 283),
     "STAND7N": (1206, 283), "STAND8N": (1256, 283),
-    "STAND8N_2": (784, 283), "STAND8N": (1256, 283),
+    "STAND8N_2": (784, 283), "STAND22N": (1320, 288),
     "STAND19N": (771,227), "STAND21N": (1320,227),
-    "STAND20N": (771, 288), "STAND22N": (1307, 283),
+    "STAND20N": (771, 288), "STAND18N": (1307, 283),
     "STAND8A": (784, 348), "STAND8B": (784, 326),
     "STAND9A": (835, 348), "STAND9B": (835, 326),
     "STAND10A": (886, 348), "STAND10B": (886, 326),
@@ -44,10 +44,9 @@ nodes = {
     "STAND18A": (1307, 348), "STAND18B": (1307, 326),
     "STAND19A": (708, 227), "STAND19B": (730, 227),
     "STAND20A": (708, 288), "STAND20B": (730, 288),
+    "STAND21A": (1385, 227), "STAND21B": (1363, 227),
     "STAND22A": (1385, 288), "STAND22B": (1363, 288),
-    "STAND23A": (1385, 227), "STAND23B": (1363, 227),
     "AQ": (771, 158), "NQ": (771, 283),
-
     "AR": (1320, 158), "NR": (1320, 283),
     "AS": (1045, 158), "NS": (1045, 283),
     "TXY_A1": (1820, 158),"A1_HOLD": (1820, 120), "RWY27_A1": (1820, 70), "RWY27_A1_ALIGN": (1760, 70), "RWY09_AirBorne": (1920,70),
@@ -99,10 +98,14 @@ edges = {
     "TXY_C1": ["TXY_D1","AQ","C1_HOLD"],
     "TXY_B1": ["TXY_A1","B1_HOLD"],
     "TXY_A1": ["AR","A1_HOLD"],
-    "AQ": ["NQ","AS"],
+    "AQ": ["STAND19N","AS"],
+    "STAND19B": ["STAND19A","STAND19N"],
     "NS": ["AS","NQ","NR","STAND1N","STAND2N","STAND3N","STAND4N","STAND5N","STAND6N","STAND7N","STAND8N"],
-    "NQ": ["STAND1N","STAND2N","STAND3N","STAND4N"],
-    "NR": ["STAND5N","STAND6N","STAND7N","STAND8N"],
+    "NQ": ["STAND1N","STAND2N","STAND3N","STAND4N","STAND8N_2","STAND20N","STAND19N"],
+    "STAND20N": ["STAND20B"],
+    "STAND20A": ["STAND20B"],
+    "STAND8B": ["STAND8N_2","STAND8A"],
+    "NR": ["STAND5N","STAND6N","STAND7N","STAND8N","STAND18N","STAND22N"],
     "AR": ["AS","NR","TXY_B1"],
     "STAND1b": ["STAND1N","STAND1a"],
     "STAND2b": ["STAND2N","STAND2a"],
@@ -112,6 +115,19 @@ edges = {
     "STAND6b": ["STAND6N","STAND6a"],
     "STAND7b": ["STAND7N","STAND7a"],
     "STAND8b": ["STAND8N","STAND8a"],
+    "STAND9B": ["STAND1N","STAND9A"],
+    "STAND10B": ["STAND2N","STAND10A"],
+    "STAND11B": ["STAND3N","STAND11A"],
+    "STAND12B": ["STAND4N","STAND12A"],
+    "STAND13B": ["NS","STAND13A"],
+    "STAND14B": ["STAND5N","STAND14A"],
+    "STAND15B": ["STAND6N","STAND15A"],
+    "STAND16B": ["STAND7N","STAND16A"],
+    "STAND17B": ["STAND8N","STAND17A"],
+    "STAND18B": ["STAND18N","STAND18A"],
+    "STAND21B": ["STAND21N","STAND21A"],
+    "STAND22B": ["STAND22N","STAND22A"],
+  
     "10m9": ["9m9"],"9m9": ["8m9"],"8m9": ["7m9"],
     "7m9": ["6m9"],"6m9": ["5m9"],"5m9": ["4m9"],
     "4m9": ["3m9"],"3m9": ["2m9"],"2m9": ["1m9"],
@@ -645,7 +661,7 @@ def draw_aircraft(canvas, x, y, callsign="TEST", direction="north", color="blue"
     The front tip of the triangle is always at position (x, y).
     
     Args:
-        direction: "north" (up), "right" for runway 09 (East), "left" for runway 27 (West)
+        direction: "north" (up), "south" (down), "right" (east), "left" (west)
     """
     size = 12
     
@@ -655,6 +671,14 @@ def draw_aircraft(canvas, x, y, callsign="TEST", direction="north", color="blue"
             x, y,               # Front point at top
             x-size, y+2*size,   # Bottom left
             x+size, y+2*size,   # Bottom right
+            fill=color
+        )
+    elif direction == "south":
+        # Triangle pointing down (south) - tip at (x, y)
+        triangle_id = canvas.create_polygon(
+            x, y,               # Front point at bottom
+            x-size, y-2*size,   # Top left
+            x+size, y-2*size,   # Top right
             fill=color
         )
     elif direction == "right":
@@ -720,7 +744,8 @@ def remove_aircraft_from_status(callsign):
 def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right", speed=1, runway_target=None):
     """Animate aircraft pushback from current position to target node.
     
-    Aircraft starts facing north and gradually rotates to final_direction near the end.
+    Aircraft keeps its stand-facing heading during most of pushback and
+    gradually rotates to final_direction near the end.
     After pushback completes, starts taxi to runway if runway_target is provided.
     
     Args:
@@ -746,12 +771,18 @@ def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right
     rotation_start_step = int(steps * 0.7)  # Start rotation at 70% of journey
     rotation_steps = steps - rotation_start_step
     
-    # Define angles: north = -90 degrees (pointing up), right = 0 degrees, left = 180 degrees
-    start_angle = -90  # North
-    if final_direction == "left":
-        end_angle = 0  # Turn right (clockwise) to east - 90 degree turn
-    else:  # left
-        end_angle = -180  # Turn left (counterclockwise) to west - 90 degree turn
+    # Determine initial heading from stand orientation when available.
+    # Optional override allows stand/runway-specific pushback behavior.
+    start_direction = aircraft_info.pop('pushback_start_direction', None) or aircraft_info.get('direction')
+    current_node = aircraft_info.get('node', '')
+    if start_direction is None and current_node in nodes and current_node.startswith("STAND") and (current_node.endswith('a') or current_node.endswith('A')):
+        start_direction = get_stand_direction(current_node)
+
+    start_angle = direction_to_heading(start_direction or "north")
+    end_angle = direction_to_heading(final_direction)
+
+    # Use shortest angular path so turn-in is always the expected ~90 degrees.
+    angle_delta = ((end_angle - start_angle + 180) % 360) - 180
     
     # Flag to track if we've moved to Taxiing status
     moved_to_taxiing = [False]
@@ -767,6 +798,8 @@ def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right
             aircraft_info['position'] = (end_x, end_y)
             aircraft_info['node'] = target_node
             aircraft_info['direction'] = final_direction
+            # Set heading to match the final orientation to prevent glitch when taxi starts
+            aircraft_info['heading'] = end_angle
             
             # Start taxi to runway if target provided
             if runway_target:
@@ -783,7 +816,7 @@ def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right
         else:
             # Smooth interpolation during rotation
             rotation_progress = (current_step - rotation_start_step) / rotation_steps
-            current_angle = start_angle + (end_angle - start_angle) * rotation_progress
+            current_angle = start_angle + angle_delta * rotation_progress
         
         # Convert angle to radians
         angle_rad = math.radians(current_angle)
@@ -842,9 +875,54 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
     
     # Get current node from aircraft info
     current_node = aircraft_info.get('node', 'STAND1N')
+
+    def _route_length(route_nodes):
+        if not route_nodes or len(route_nodes) < 2:
+            return 0.0
+        return sum(
+            math.dist(nodes[route_nodes[i]], nodes[route_nodes[i + 1]])
+            for i in range(len(route_nodes) - 1)
+        )
     
     # Find path using dijkstra
     route = dijkstra(current_node, destination_node)
+
+    # Runway 27 rule: departures leaving stand area must flow out via AS or AR.
+    runway_selector = globals().get('runway_var')
+    runway_in_use = runway_selector.get() if runway_selector else None
+
+    if runway_in_use == "27" and destination_node == "A1_HOLD" and (current_node.startswith("STAND") or current_node == "NS"):
+        best_route = None
+        best_route_length = None
+        for stand_exit in ("AS", "AR"):
+            to_exit = dijkstra(current_node, stand_exit)
+            from_exit = dijkstra(stand_exit, destination_node)
+            if not to_exit or not from_exit:
+                continue
+            candidate = to_exit + from_exit[1:]
+            candidate_length = _route_length(candidate)
+            if best_route is None or candidate_length < best_route_length:
+                best_route = candidate
+                best_route_length = candidate_length
+        if best_route:
+            route = best_route
+
+    # Runway 09 rule: departures leaving stand area must flow out via AQ or AS.
+    if runway_in_use == "09" and destination_node == "E1_HOLD" and (current_node.startswith("STAND") or current_node == "NS"):
+        best_route = None
+        best_route_length = None
+        for stand_exit in ("AQ", "AS"):
+            to_exit = dijkstra(current_node, stand_exit)
+            from_exit = dijkstra(stand_exit, destination_node)
+            if not to_exit or not from_exit:
+                continue
+            candidate = to_exit + from_exit[1:]
+            candidate_length = _route_length(candidate)
+            if best_route is None or candidate_length < best_route_length:
+                best_route = candidate
+                best_route_length = candidate_length
+        if best_route:
+            route = best_route
     
     if not route:
         print(f"No route found from {current_node} to {destination_node}")
@@ -854,8 +932,9 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
     aircraft_info['route_index'] = 0
     aircraft_info.pop('segment_start_override', None)
     aircraft_info.pop('segment_start_override_idx', None)
-    if not aircraft_info.get('path_history'):
-        aircraft_info['path_history'] = [aircraft_info.get('position', nodes[current_node])]
+    # Clear heading and path history when starting taxi to ensure proper initialization from new segment
+    aircraft_info.pop('heading', None)
+    aircraft_info['path_history'] = [aircraft_info.get('position', nodes[current_node])]
 
     def _rear_from_history(history, wheelbase):
         if not history:
@@ -2057,32 +2136,20 @@ def is_stand_available(stand_name):
     return True
 
 def find_available_stand():
-    """Find the first available stand (not occupied or reserved by another aircraft)."""
-    stands = ["STAND1a", "STAND2a", "STAND3a", "STAND4a", "STAND5a", "STAND6a", "STAND7a", "STAND8a"]
-    
-    # Check which stands are currently occupied or reserved
-    occupied_stands = set()
-    for callsign, info in active_aircraft.items():
-        # Check physical occupancy
-        node = info.get('node', '')
-        if node in stands:
-            occupied_stands.add(node)
-        # Check reservations (target stands for landing aircraft)
-        target = info.get('target_stand', '')
-        if target in stands:
-            occupied_stands.add(target)
-    
-    # Find first available stand
-    for stand in stands:
-        if stand not in occupied_stands:
-            return stand
-    
-    # Return None if all stands occupied
-    return None
+    """Find a random available stand (not occupied or reserved by another aircraft)."""
+    import random
+    available_stands = find_available_stands()
+    if not available_stands:
+        return None
+    return random.choice(available_stands)
 
 def find_available_stands():
     """Return a list of available stands (not occupied or reserved)."""
-    stands = ["STAND1a", "STAND2a", "STAND3a", "STAND4a", "STAND5a", "STAND6a", "STAND7a", "STAND8a"]
+    stands = [
+        "STAND1a", "STAND2a", "STAND3a", "STAND4a", "STAND5a", "STAND6a", "STAND7a", "STAND8a",
+        "STAND9A", "STAND10A", "STAND11A", "STAND12A", "STAND13A", "STAND14A", "STAND15A", "STAND16A", "STAND17A", "STAND18A",
+        "STAND19A", "STAND20A", "STAND21A", "STAND22A"
+    ]
     occupied_stands = set()
     for callsign, info in active_aircraft.items():
         node = info.get('node', '')
@@ -2205,6 +2272,7 @@ def is_pushback_path_clear(callsign, stand_node, target_node, corridor_half_widt
     - Aircraft physically behind/in the pushback corridor (stand -> standN)
     - Aircraft already at/near standN where pushback exits
     - Aircraft with upcoming taxi route steps that enter the same stand pushback nodes
+    - Full planned routes of aircraft in Taxiing/Departures status to prevent route obstructions
     """
     if stand_node not in nodes or target_node not in nodes:
         return True
@@ -2239,11 +2307,75 @@ def is_pushback_path_clear(callsign, stand_node, target_node, corridor_half_widt
         if route:
             route_idx = info.get('route_index', 0)
             route_idx = max(0, min(route_idx, len(route) - 1))
-            upcoming_nodes = route[route_idx:route_idx + route_lookahead]
-            if any(node in conflict_nodes for node in upcoming_nodes):
+            # For Taxiing/Departing aircraft, check entire remaining route to prevent obstruction.
+            other_status = aircraft_labels.get(other_callsign, {}).get('column')
+            if other_status in {'Taxiing', 'Departures'}:
+                # Check full route ahead for departing aircraft to maximize lookahead
+                remaining_route = route[route_idx:]
+            else:
+                # For other aircraft, use standard lookahead window
+                remaining_route = route[route_idx:route_idx + route_lookahead]
+            if any(node in conflict_nodes for node in remaining_route):
+                return False
+        elif info.get('route'):
+            # If aircraft is queued with a route, also check it
+            other_status = aircraft_labels.get(other_callsign, {}).get('column')
+            if other_status in {'Taxiing', 'Departures', 'Interrupting'}:
+                # Be conservative: block pushback if a departure/taxi aircraft is active
                 return False
 
     return True
+
+def get_stand_direction(stand_node):
+    """Determine the direction aircraft should face at a given stand (nose toward a/A, tail toward b/B)."""
+    # Extract the base stand name without the a/b or A/B suffix
+    if stand_node.endswith('a') or stand_node.endswith('b'):
+        # STAND1-8: lowercase a/b - vertical stands
+        base = stand_node[:-1]
+        a_node = base + 'a'
+        b_node = base + 'b'
+        if a_node in nodes and b_node in nodes:
+            ax, ay = nodes[a_node]
+            bx, by = nodes[b_node]
+            # If a is above b (lower y), face north; if a is below b (higher y), face south
+            if ay < by:
+                return "north"
+            else:
+                return "south"
+    elif stand_node.endswith('A') or stand_node.endswith('B'):
+        # STAND9-22: uppercase A/B
+        base = stand_node[:-1]
+        a_node = base + 'A'
+        b_node = base + 'B'
+        if a_node in nodes and b_node in nodes:
+            ax, ay = nodes[a_node]
+            bx, by = nodes[b_node]
+            # Check if vertical (same x) or horizontal (same y)
+            if ax == bx:
+                # Vertical: if A is below B (higher y), face south; if A is above B (lower y), face north
+                if ay > by:
+                    return "south"
+                else:
+                    return "north"
+            else:
+                # Horizontal: if A is left of B (lower x), face left; if A is right of B (higher x), face right
+                if ax < bx:
+                    return "left"
+                else:
+                    return "right"
+    return "north"  # Default fallback
+
+def direction_to_heading(direction):
+    """Convert direction string to heading angle in degrees."""
+    direction_map = {
+        "north": -90,
+        "south": 90,
+        "east": 0,
+        "right": 0,
+        "west": -180,
+        "left": -180
+    }
+    return direction_map.get(direction, -90)
 
 def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
     """Special taxi function for landing aircraft that ignores stop bars.
@@ -2258,6 +2390,23 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
     
     # Find path using dijkstra
     route = dijkstra(current_node, destination_stand)
+
+    # Runway 27 rule: arrivals must enter stand area via AQ.
+    runway_selector = globals().get('runway_var')
+    runway_in_use = runway_selector.get() if runway_selector else None
+
+    if runway_in_use == "27" and current_node != "AQ":
+        to_aq = dijkstra(current_node, "AQ")
+        from_aq = dijkstra("AQ", destination_stand)
+        if to_aq and from_aq:
+            route = to_aq + from_aq[1:]
+
+    # Runway 09 rule: arrivals must enter stand area via AR.
+    if runway_in_use == "09" and current_node != "AR":
+        to_ar = dijkstra(current_node, "AR")
+        from_ar = dijkstra("AR", destination_stand)
+        if to_ar and from_ar:
+            route = to_ar + from_ar[1:]
     
     if not route:
         print(f"No route found from {current_node} to {destination_stand}")
@@ -2292,6 +2441,32 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
             # Reached final destination (stand)
             aircraft_info['node'] = destination_stand
             aircraft_info['position'] = nodes[destination_stand]
+            
+            # Reorient aircraft to face correct direction at stand
+            stand_direction = get_stand_direction(destination_stand)
+            aircraft_info['direction'] = stand_direction
+            aircraft_info['heading'] = direction_to_heading(stand_direction)
+            
+            # Update triangle to face the correct direction
+            x, y = nodes[destination_stand]
+            size = 12
+            angle_rad = math.radians(aircraft_info['heading'])
+            
+            base_points = [
+                (0, 0),
+                (-2*size, -size),
+                (-2*size, size)
+            ]
+            cos_a = math.cos(angle_rad)
+            sin_a = math.sin(angle_rad)
+            rotated_points = []
+            for px, py in base_points:
+                rx = px * cos_a - py * sin_a
+                ry = px * sin_a + py * cos_a
+                rotated_points.extend([x + rx, y + ry])
+            
+            canvas.coords(aircraft_info['triangle_id'], *rotated_points)
+            canvas.coords(aircraft_info['label_id'], x, y - size - 10)
             
             # Move to Arrivals status
             move_aircraft_status(aircraft_info['callsign'], 'Arrivals')
@@ -2857,11 +3032,43 @@ def build_home_screen():
         if aircraft_info.get('node') != stand_node:
             return
 
-        stand_n_node = f"{stand_node[:-1]}N"
+        # Pushback targets should be stand-facing N-style nodes so aircraft reverse out then
+        # complete the 90-degree turn ready to taxi toward the active runway.
+        stand_pushback_node_map = {
+            "STAND8A": "STAND8N_2",
+            "STAND9A": "STAND1N",
+            "STAND10A": "STAND2N",
+            "STAND11A": "STAND3N",
+            "STAND12A": "STAND4N",
+            "STAND13A": "NS",
+            "STAND14A": "STAND5N",
+            "STAND15A": "STAND6N",
+            "STAND16A": "STAND7N",
+            "STAND17A": "STAND8N",
+            "STAND18A": "STAND18N",
+            "STAND19A": "STAND19N",
+            "STAND20A": "STAND20N",
+            "STAND21A": "STAND21N",
+            "STAND22A": "STAND22N",
+        }
+
+        stand_pushback_node = stand_pushback_node_map.get(stand_node, f"{stand_node[:-1]}N")
+        if stand_pushback_node not in nodes:
+            print(f"No valid pushback node found for stand {stand_node}: {stand_pushback_node}")
+            return
 
         runway = runway_var.get()
-        final_direction = "right" if runway == "09" else "left"
+        # Runway 09 departures taxi toward E1 (west/left), runway 27 departures taxi toward A1 (east/right)
+        final_direction = "left" if runway == "09" else "right"
         runway_target = "A1_HOLD" if runway == "27" else "E1_HOLD"
+
+        # Special pushback heading handling for side stands.
+        # For runway 27, stands 19/20 should remain south-facing during most of pushback,
+        # then complete the 90-degree turn near the stand-area exit.
+        if runway == "27" and stand_node in {"STAND19A", "STAND20A"}:
+            aircraft_info['pushback_start_direction'] = "south"
+        else:
+            aircraft_info.pop('pushback_start_direction', None)
 
         if callsign in aircraft_labels:
             move_aircraft_status(callsign, 'Departures')
@@ -2874,14 +3081,14 @@ def build_home_screen():
             if aircraft_info.get('node') != stand_node:
                 return
 
-            if not is_pushback_path_clear(callsign, stand_node, stand_n_node):
+            if not is_pushback_path_clear(callsign, stand_node, stand_pushback_node):
                 aircraft_info['waiting_for_pushback_clearance'] = True
                 aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
                 return
 
             aircraft_info['waiting_for_pushback_clearance'] = False
             aircraft_info.pop('pushback_wait_job_id', None)
-            pushback_aircraft(main_canvas, aircraft_info, stand_n_node, final_direction, runway_target=runway_target)
+            pushback_aircraft(main_canvas, aircraft_info, stand_pushback_node, final_direction, runway_target=runway_target)
 
         aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
 
@@ -2903,27 +3110,28 @@ def build_home_screen():
     schedule_turnaround_cb = schedule_turnaround
 
     def seed_initial_aircraft():
-        """Seed 2-5 parked aircraft on random stands and schedule turnarounds."""
+        """Seed 5-10 parked aircraft on random stands and schedule turnarounds."""
         if not main_canvas:
             return
         import random
         available_stands = find_available_stands()
         if not available_stands:
             return
-        seed_count = min(len(available_stands), random.randint(2, 5))
+        seed_count = min(len(available_stands), random.randint(5, 10))
         seed_stands = random.sample(available_stands, seed_count)
 
         for stand_node in seed_stands:
             x, y = nodes[stand_node]
             callsign = generate_unique_callsign("ARR")
-            triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, "north", color="blue")
+            direction = get_stand_direction(stand_node)
+            triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, direction, color="blue")
             aircraft_info = {
                 'callsign': callsign,
                 'position': (x, y),
                 'node': stand_node,
                 'triangle_id': triangle_id,
                 'label_id': label_id,
-                'direction': 'north'
+                'direction': direction
             }
             active_aircraft[callsign] = aircraft_info
             add_aircraft_to_status(callsign, 'Arrivals')
