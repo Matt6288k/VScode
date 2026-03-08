@@ -451,6 +451,7 @@ stop_bars = {}
 stop_bar_draw_ids = {}
 stop_bar_off_until = {}  # Track when each stop bar should turn back on (time-based)
 next_departure_release_time = 0.0  # Track when the next departure may be released (time-based)
+next_pushback_release_time = 0.0  # Track when the next stand pushback may be released (time-based)
 runway_protected = True  # Track if runway is protected (stop bars on)
 simulation_speed = 1.0  # Speed multiplier for simulation (1x, 10x)
 simulation_time_seconds = 0.0
@@ -463,12 +464,21 @@ graph_visible = True  # Track whether graph is currently visible
 simulation_running = False
 activity_job_id = None
 schedule_turnaround_cb = None
+ops_var = None
+pushback_timer_label = None
 
 # ==============================
 # SPEED CONTROL HELPER
 def adjust_delay(base_delay_ms):
     """Adjust a delay in milliseconds based on simulation speed multiplier."""
     return max(1, int(base_delay_ms / simulation_speed))
+
+def get_taxi_speed_multiplier():
+    """Return taxi speed multiplier based on selected operations mode."""
+    ops_selector = globals().get('ops_var')
+    if ops_selector and ops_selector.get() == "Low Visibility Ops":
+        return 1 / 6
+    return 1.0
 
 def get_simulation_time():
     """Return monotonically increasing simulation time in seconds.
@@ -556,24 +566,113 @@ def toggle_graph_visibility():
 
 # ==============================
 # STOP BARS
-# Manual pixel coordinates for stop bar lights at each hold point
-STOP_BAR_POSITIONS = {
+# NORMAL OPS stop bars (current runway hold locations)
+# control_node drives stop-bar release logic; red is manual pixel coordinates.
+STOP_BAR_POSITIONS_NORMAL = {
     "A1_HOLD": {
-        "red": [(1810, 120), (1815, 120), (1820, 120), (1825, 120), (1830, 120), (1835, 120)], 
+        "control_node": "A1_HOLD",
+        "red": [(1810, 120), (1815, 120), (1820, 120), (1825, 120), (1830, 120), (1835, 120)],
     },
     "B1_HOLD": {
+        "control_node": "B1_HOLD",
         "red": [(1548, 120), (1553, 120), (1558, 120), (1563, 120), (1568, 120)],
     },
     "C1_HOLD": {
+        "control_node": "C1_HOLD",
         "red": [(635, 120), (640, 120), (645, 120), (650, 120), (655, 120)],
     },
     "D1_HOLD": {
+        "control_node": "D1_HOLD",
         "red": [(204, 120), (209, 120), (214, 120), (219, 120), (224, 120)],
     },
     "E1_HOLD": {
+        "control_node": "E1_HOLD",
         "red": [(90, 120), (95, 120), (100, 120), (105, 120), (110, 120), (115, 120)],
-    }
+    },
 }
+
+# LOW VIS OPS runway-hold stop bars (separate placeholders so you can relocate them).
+# Replace the red coordinate lists below with your desired low-vis runway-hold positions.
+STOP_BAR_POSITIONS_LOW_VIS_RUNWAY = {
+    "A1_HOLD": {
+        "control_node": "A1_HOLD",
+        "red": [(1790, 148), (1790, 153), (1790, 158), (1790, 163), (1790, 168)],  # TODO: low-vis runway hold position for A1_HOLD
+    },
+    "B1_HOLD": {
+        "control_node": "B1_HOLD",
+        "red": [(1548, 135), (1553, 135), (1558, 135), (1563, 135), (1568, 135)],  # TODO: low-vis runway hold position for B1_HOLD
+    },
+    "C1_HOLD": {
+        "control_node": "C1_HOLD",
+        "red": [(635, 135), (640, 135), (645, 135), (650, 135), (655, 135)],  # TODO: low-vis runway hold position for C1_HOLD
+    },
+    "D1_HOLD": {
+        "control_node": "D1_HOLD",
+        "red": [(204, 135), (209, 135), (214, 135), (219, 135), (224, 135)],  # TODO: low-vis runway hold position for D1_HOLD
+    },
+    "E1_HOLD": {
+        "control_node": "E1_HOLD",
+        "red": [(135, 148), (135, 153), (135, 158), (135, 163), (135, 168)],  # TODO: low-vis runway hold position for E1_HOLD
+    },
+}
+
+# LOW VIS OPS additional taxiway stop bars (placeholders).
+# Add your manual pixel coordinates in red lists and set control_node if you want release logic tied to a node.
+# If control_node is None, that stop bar stays continuously red.
+STOP_BAR_POSITIONS_LOW_VIS_EXTRA = {
+    "LOWVIS_TWY_SB_1": {
+        "control_node": None,
+        "red": [],  # TODO: e.g. [(x1, y1), (x2, y2), ...]
+    },
+    "LOWVIS_TWY_SB_2": {
+        "control_node": None,
+        "red": [],
+    },
+    "LOWVIS_TWY_SB_3": {
+        "control_node": None,
+        "red": [],
+    },
+    "LOWVIS_TWY_SB_4": {
+        "control_node": None,
+        "red": [],
+    },
+}
+
+def get_active_stop_bar_positions():
+    """Return stop bar configuration for the selected operations mode."""
+    ops_selector = globals().get('ops_var')
+    is_low_vis = bool(ops_selector and ops_selector.get() == "Low Visibility Ops")
+
+    if is_low_vis:
+        combined = {}
+        combined.update(STOP_BAR_POSITIONS_LOW_VIS_RUNWAY)
+        combined.update(STOP_BAR_POSITIONS_LOW_VIS_EXTRA)
+        return combined
+
+    return STOP_BAR_POSITIONS_NORMAL
+
+def is_stop_bar_illuminated_for_node(node_name):
+    """Return True if any active stop bar controlling node_name is currently illuminated."""
+    if not node_name:
+        return False
+
+    active_stop_bars = get_active_stop_bar_positions()
+    for stop_bar_name, cfg in active_stop_bars.items():
+        control_node = cfg.get("control_node", stop_bar_name)
+        if control_node != node_name:
+            continue
+        if len(stop_bar_draw_ids.get(stop_bar_name, [])) > 0:
+            return True
+    return False
+
+def can_depart_from_hold_node(hold_node):
+    """Return True when departure is allowed to proceed beyond hold_node."""
+    if not hold_node or not hold_node.endswith('_HOLD'):
+        return True
+
+    stop_bar_illuminated = is_stop_bar_illuminated_for_node(hold_node)
+    arrival_too_close = is_arrival_within_5nm()
+    return is_runway_clear() and (not stop_bar_illuminated) and (not arrival_too_close)
 
 def draw_stop_bars(canvas):
     """Draw stop bars at runway hold points using manual pixel coordinates.
@@ -592,6 +691,13 @@ def draw_stop_bars(canvas):
     
     current_time = get_simulation_time()
     
+    active_stop_bars = get_active_stop_bar_positions()
+    controlled_nodes = {
+        cfg.get('control_node', stop_bar_name)
+        for stop_bar_name, cfg in active_stop_bars.items()
+        if cfg.get('control_node', stop_bar_name)
+    }
+
     # Check which hold points have DEPARTING aircraft that should turn off the stop bar
     # Landing aircraft (with ignore_stop_bars flag) should NOT affect stop bars
     for callsign, info in active_aircraft.items():
@@ -604,39 +710,44 @@ def draw_stop_bars(canvas):
         is_landing_aircraft = info.get('ignore_stop_bars', False)
         arrival_too_close = is_arrival_within_5nm()
         
-        if node and node.endswith('_HOLD') and is_runway_clear() and not is_landing_aircraft and not arrival_too_close:
+        if node and node in controlled_nodes and is_runway_clear() and not is_landing_aircraft and not arrival_too_close:
             # If this hold's stop bar isn't already off, turn it off now and set timer
             if (node not in stop_bar_off_until or current_time >= stop_bar_off_until[node]) and current_time >= next_departure_release_time:
                 stop_bar_duration = 5.0
                 stop_bar_off_until[node] = current_time + stop_bar_duration
-    
-    for hold_name, positions in STOP_BAR_POSITIONS.items():
-        if not positions.get("red"):
+
+    for stop_bar_name, cfg in active_stop_bars.items():
+        red_positions = cfg.get("red", [])
+        control_node = cfg.get("control_node", stop_bar_name)
+
+        if not red_positions:
             continue  # Skip if no red positions defined
-            
+
         items = []
-        
+
         # Red lights are OFF if we're within the timer period AND no arrival is within 3nm (3 miles)
         # Red lights turn back ON immediately if arrival comes within 3nm
-        is_off = hold_name in stop_bar_off_until and current_time < stop_bar_off_until[hold_name] and not is_arrival_within_5nm()
+        is_controlled = control_node is not None
+        is_off = (
+            is_controlled
+            and control_node in stop_bar_off_until
+            and current_time < stop_bar_off_until[control_node]
+            and not is_arrival_within_5nm()
+        )
         show_red_lights = not is_off
-        
+
         # Draw red stop bar lights
         if show_red_lights:
-            for x, y in positions.get("red", []):
+            for x, y in red_positions:
                 light_id = canvas.create_oval(
                     x-2, y-2, x+2, y+2,
                     fill="red", outline="red", width=1
                 )
                 canvas.tag_raise(light_id)  # Bring to front
                 items.append(light_id)
-        
+
         if items:
-            stop_bar_draw_ids[hold_name] = items
-            items.append(light_id)
-        
-        if items:
-            stop_bar_draw_ids[hold_name] = items
+            stop_bar_draw_ids[stop_bar_name] = items
 
 def update_stop_bars(canvas):
     """Update stop bar lights based on runway status."""
@@ -954,6 +1065,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
     
     def move_to_next_node():
         """Move aircraft to the next node in the route."""
+        effective_speed = max(0.01, speed * get_taxi_speed_multiplier())
         route_idx = aircraft_info.get('route_index', 0)
         
         if route_idx >= len(route) - 1:
@@ -968,9 +1080,23 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
                     runway_entry = "RWY27_A1_ALIGN"
                 else:  # E1_HOLD
                     runway_entry = "RWY09_E1_ALIGN"
-                
-                # Continue to runway entry point after brief hold
-                app.after(adjust_delay(500), lambda: taxi_aircraft(canvas, aircraft_info, runway_entry))
+
+                # Hold at the stop bar until all release conditions are satisfied.
+                def attempt_hold_release():
+                    if aircraft_info.get('node') != destination_node:
+                        return
+                    if can_depart_from_hold_node(destination_node):
+                        move_aircraft_status(aircraft_info['callsign'], 'Runway')
+                        if main_canvas:
+                            update_stop_bars(main_canvas)
+                        taxi_aircraft(canvas, aircraft_info, runway_entry)
+                    else:
+                        aircraft_info['waiting_at_hold'] = True
+                        if main_canvas:
+                            update_stop_bars(main_canvas)
+                        app.after(adjust_delay(1000), attempt_hold_release)
+
+                app.after(adjust_delay(500), attempt_hold_release)
             # Check if we've reached a runway entry point and should start takeoff
             elif destination_node in ["RWY27_A1", "RWY09_E1", "RWY27_A1_ALIGN", "RWY09_E1_ALIGN"]:
                 # Determine the airborne node based on runway
@@ -1007,13 +1133,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
         # Check if we're about to pass through a HOLD node (departing from it)
         # If so, check if runway is clear before proceeding
         if current_node.endswith('_HOLD'):
-            # Check if stop bar at this hold point is illuminated (red lights on)
-            stop_bar_illuminated = current_node in stop_bar_draw_ids and len(stop_bar_draw_ids.get(current_node, [])) > 0
-            
-            # Also check if any arrival is within 3nm (3 miles) of the runway
-            arrival_too_close = is_arrival_within_5nm()
-            
-            if not is_runway_clear() or stop_bar_illuminated or arrival_too_close:
+            if not can_depart_from_hold_node(current_node):
                 # Runway is occupied, stop bar is on, or arrival is too close - wait and check again
                 aircraft_info['waiting_at_hold'] = True
                 app.after(adjust_delay(1000), move_to_next_node)  # Check again
@@ -1041,7 +1161,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
         segment_points, next_start_override = build_taxi_segment_points(
             route,
             route_idx,
-            speed=speed,
+            speed=effective_speed,
             start_override=start_override
         )
         if not segment_points:
@@ -1094,7 +1214,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
         
         if use_distance_stepping:
             # For runway segments, use distance-based animation like landing_aircraft
-            avg_speed = 0.24  # Taxi speed in pixels per frame
+            avg_speed = effective_speed  # Taxi speed in pixels per frame
             steps = max(int(distance / avg_speed), 1)
             
             def animate_segment(step=0):
@@ -1127,7 +1247,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
                     ux, uy = 0.0, 0.0
                 
                 remaining = aircraft_info.get('segment_remaining_distance', distance)
-                move_dist = min(speed, remaining)
+                move_dist = min(effective_speed, remaining)
                 step_x = ux * move_dist
                 step_y = uy * move_dist
                 
@@ -1704,6 +1824,9 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
     # Track status changes
     moved_to_taxiing = [False]
 
+    def _arrival_taxi_speed():
+        return max(0.01, 0.24 * get_taxi_speed_multiplier())
+
     def _rear_from_history(history, wheelbase):
         if not history:
             return nodes[route[0]]
@@ -1730,7 +1853,7 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
         segment_points, next_start_override = build_taxi_segment_points(
             route,
             route_idx,
-            speed=0.24,
+            speed=_arrival_taxi_speed(),
             start_override=start_override
         )
         if not segment_points:
@@ -2146,9 +2269,8 @@ def find_available_stand():
 def find_available_stands():
     """Return a list of available stands (not occupied or reserved)."""
     stands = [
-        "STAND1a", "STAND2a", "STAND3a", "STAND4a", "STAND5a", "STAND6a", "STAND7a", "STAND8a",
-        "STAND9A", "STAND10A", "STAND11A", "STAND12A", "STAND13A", "STAND14A", "STAND15A", "STAND16A", "STAND17A", "STAND18A",
-        "STAND19A", "STAND20A", "STAND21A", "STAND22A"
+        "STAND1a", "STAND2a", "STAND3a", "STAND4a", "STAND5a", "STAND6a", "STAND7a", "STAND8a","STAND8A",
+        "STAND9A", "STAND10A", "STAND11A", "STAND12A", "STAND13A", "STAND14A", "STAND15A", "STAND16A", "STAND17A", "STAND18A"
     ]
     occupied_stands = set()
     for callsign, info in active_aircraft.items():
@@ -2265,6 +2387,70 @@ def _distance_point_to_segment(px, py, ax, ay, bx, by):
     proj_y = ay + aby * t_clamped
     return math.hypot(px - proj_x, py - proj_y), t
 
+def get_opposite_stand(stand_node):
+    """Return the stand directly opposite to the given stand, or None if no opposite exists."""
+    # Mapping of upper stands (lower y-coordinate) to lower stands (higher y-coordinate)
+    opposite_pairs = {
+        "STAND1a": "STAND9A", "STAND1b": "STAND9B",
+        "STAND2a": "STAND10A", "STAND2b": "STAND10B",
+        "STAND3a": "STAND11A", "STAND3b": "STAND11B",
+        "STAND4a": "STAND12A", "STAND4b": "STAND12B",
+        "STAND5a": "STAND14A", "STAND5b": "STAND14B",
+        "STAND6a": "STAND15A", "STAND6b": "STAND15B",
+        "STAND7a": "STAND16A", "STAND7b": "STAND16B",
+        "STAND8a": "STAND17A", "STAND8b": "STAND17B",
+        # Reverse mappings
+        "STAND9A": "STAND1a", "STAND9B": "STAND1b",
+        "STAND10A": "STAND2a", "STAND10B": "STAND2b",
+        "STAND11A": "STAND3a", "STAND11B": "STAND3b",
+        "STAND12A": "STAND4a", "STAND12B": "STAND4b",
+        "STAND14A": "STAND5a", "STAND14B": "STAND5b",
+        "STAND15A": "STAND6a", "STAND15B": "STAND6b",
+        "STAND16A": "STAND7a", "STAND16B": "STAND7b",
+        "STAND17A": "STAND8a", "STAND17B": "STAND8b",
+    }
+    return opposite_pairs.get(stand_node)
+
+def get_stand_pushback_node(stand_node):
+    """Return the pushback target node for a stand node."""
+    stand_pushback_node_map = {
+        "STAND8A": "STAND8N_2",
+        "STAND9A": "STAND1N",
+        "STAND10A": "STAND2N",
+        "STAND11A": "STAND3N",
+        "STAND12A": "STAND4N",
+        "STAND13A": "NS",
+        "STAND14A": "STAND5N",
+        "STAND15A": "STAND6N",
+        "STAND16A": "STAND7N",
+        "STAND17A": "STAND8N",
+        "STAND18A": "STAND18N",
+        "STAND19A": "STAND19N",
+        "STAND20A": "STAND20N",
+        "STAND21A": "STAND21N",
+        "STAND22A": "STAND22N",
+    }
+    return stand_pushback_node_map.get(stand_node, f"{stand_node[:-1]}N")
+
+def has_pushback_priority(callsign, other_callsign):
+    """Return True when callsign should get pushback priority over other_callsign."""
+    my_info = active_aircraft.get(callsign, {})
+    other_info = active_aircraft.get(other_callsign, {})
+
+    my_time = my_info.get('pushback_queue_time')
+    other_time = other_info.get('pushback_queue_time')
+
+    if my_time is None and other_time is None:
+        return callsign <= other_callsign
+    if my_time is None:
+        return False
+    if other_time is None:
+        return True
+
+    if abs(my_time - other_time) > 1e-6:
+        return my_time < other_time
+    return callsign <= other_callsign
+
 def is_pushback_path_clear(callsign, stand_node, target_node, corridor_half_width=30, node_clearance=40, route_lookahead=5):
     """Return True if no aircraft is blocking or converging on the pushback path.
 
@@ -2273,9 +2459,44 @@ def is_pushback_path_clear(callsign, stand_node, target_node, corridor_half_widt
     - Aircraft already at/near standN where pushback exits
     - Aircraft with upcoming taxi route steps that enter the same stand pushback nodes
     - Full planned routes of aircraft in Taxiing/Departures status to prevent route obstructions
+    - Opposite stand collision: prevents simultaneous pushback from opposing stands
     """
     if stand_node not in nodes or target_node not in nodes:
         return True
+    
+    # Check if opposite stand has aircraft pushing back or waiting to pushback
+    opposite_stand = get_opposite_stand(stand_node)
+    if opposite_stand:
+        for other_callsign, info in active_aircraft.items():
+            if other_callsign == callsign:
+                continue
+            
+            other_node = info.get('node')
+            other_status = aircraft_labels.get(other_callsign, {}).get('column')
+            
+            # Check if aircraft at opposite stand is waiting for pushback clearance.
+            # Avoid deadlock by allowing only lower-priority aircraft to yield.
+            if info.get('waiting_for_pushback_clearance') and other_node == opposite_stand:
+                if not has_pushback_priority(callsign, other_callsign):
+                    return False
+            
+            # Check if aircraft at opposite stand is in departure/taxiing status (actively pushing back)
+            if other_status in {'Departures', 'Taxiing'}:
+                # Aircraft at the opposite stand itself
+                if other_node == opposite_stand:
+                    # If both are queued at opposite stands, only lower-priority aircraft yields.
+                    if info.get('waiting_for_pushback_clearance'):
+                        if not has_pushback_priority(callsign, other_callsign):
+                            return False
+                    else:
+                        return False
+                # Aircraft at the opposite stand's pushback node (recently pushed back)
+                opposite_pushback_node = f"{opposite_stand[:-1]}N" if opposite_stand.endswith(('a', 'A')) else None
+                if opposite_pushback_node and other_node == opposite_pushback_node:
+                    # Allow if they've been at the N node long enough (route_index > 0)
+                    route_idx = info.get('route_index', 0)
+                    if route_idx == 0:
+                        return False
 
     sx, sy = nodes[stand_node]
     tx, ty = nodes[target_node]
@@ -2309,11 +2530,17 @@ def is_pushback_path_clear(callsign, stand_node, target_node, corridor_half_widt
             route_idx = max(0, min(route_idx, len(route) - 1))
             # For Taxiing/Departing aircraft, check entire remaining route to prevent obstruction.
             other_status = aircraft_labels.get(other_callsign, {}).get('column')
-            if other_status in {'Taxiing', 'Departures'}:
+            is_inbound_arrival_taxi = bool(info.get('ignore_stop_bars', False))
+            if is_inbound_arrival_taxi:
+                # Inbound-arrival planned routes can over-block pushback.
+                # Let physical/corridor checks above handle separation, and let arrivals
+                # yield via should_arrival_yield_for_pushback() when needed.
+                continue
+            if other_status in {'Taxiing', 'Departures'} and not is_inbound_arrival_taxi:
                 # Check full route ahead for departing aircraft to maximize lookahead
                 remaining_route = route[route_idx:]
             else:
-                # For other aircraft, use standard lookahead window
+                # For arrivals/inbound or other aircraft, use standard lookahead window
                 remaining_route = route[route_idx:route_idx + route_lookahead]
             if any(node in conflict_nodes for node in remaining_route):
                 return False
@@ -2325,6 +2552,39 @@ def is_pushback_path_clear(callsign, stand_node, target_node, corridor_half_widt
                 return False
 
     return True
+
+def should_arrival_yield_for_pushback(callsign, route, route_idx, lookahead=5):
+    """Return True when an inbound arrival should briefly hold to let a queued pushback depart first."""
+    if not route:
+        return False
+
+    route_idx = max(0, min(route_idx, len(route) - 1))
+    upcoming_nodes = set(route[route_idx:route_idx + lookahead])
+    if not upcoming_nodes:
+        return False
+
+    for other_callsign, info in active_aircraft.items():
+        if other_callsign == callsign:
+            continue
+
+        if not info.get('waiting_for_pushback_clearance'):
+            continue
+
+        stand_node = info.get('node', '')
+        if not (stand_node.startswith("STAND") and stand_node.endswith(("A", "a"))):
+            continue
+
+        pushback_node = get_stand_pushback_node(stand_node)
+        if pushback_node not in nodes:
+            continue
+
+        conflict_nodes = {stand_node, pushback_node}
+        conflict_nodes.update(edges.get(pushback_node, []))
+
+        if any(node in upcoming_nodes for node in conflict_nodes):
+            return True
+
+    return False
 
 def get_stand_direction(stand_node):
     """Determine the direction aircraft should face at a given stand (nose toward a/A, tail toward b/B)."""
@@ -2384,6 +2644,9 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
     when exiting the runway.
     """
     import math
+
+    def _arrival_taxi_speed():
+        return max(0.01, 0.24 * get_taxi_speed_multiplier())
     
     # Get current node from aircraft info
     current_node = aircraft_info.get('node', '')
@@ -2435,7 +2698,14 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
     
     def move_to_next_node():
         """Move aircraft to the next node in the route."""
+        effective_speed = _arrival_taxi_speed()
         route_idx = aircraft_info.get('route_index', 0)
+
+        if should_arrival_yield_for_pushback(aircraft_info['callsign'], route, route_idx):
+            aircraft_info['waiting_for_pushback_priority'] = True
+            app.after(adjust_delay(1000), move_to_next_node)
+            return
+        aircraft_info['waiting_for_pushback_priority'] = False
         
         if route_idx >= len(route) - 1:
             # Reached final destination (stand)
@@ -2468,8 +2738,8 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
             canvas.coords(aircraft_info['triangle_id'], *rotated_points)
             canvas.coords(aircraft_info['label_id'], x, y - size - 10)
             
-            # Move to Arrivals status
-            move_aircraft_status(aircraft_info['callsign'], 'Arrivals')
+            # Aircraft has reached stand - turnaround will be scheduled next
+            # (Status will be set to Turnaround by schedule_turnaround_cb)
 
             if 'triangle_id' in aircraft_info and aircraft_info['triangle_id']:
                 canvas.itemconfig(aircraft_info['triangle_id'], fill="blue")
@@ -2490,15 +2760,10 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
         current_node = route[route_idx]
         next_node = route[route_idx + 1]
         
-        # For landing aircraft, ignore stop bars for the first few nodes after runway exit
-        # This allows them to taxi straight through the exit point stop bar
-        should_ignore_stopbar = aircraft_info.get('ignore_stop_bars', False) and route_idx < 3
-        
         # Check if we're about to pass through a HOLD node (departing from it)
-        # Only check if we're not ignoring stop bars
-        if current_node.endswith('_HOLD') and not should_ignore_stopbar:
+        if current_node.endswith('_HOLD'):
             # Check if stop bar at this hold point is illuminated (red lights on)
-            stop_bar_illuminated = current_node in stop_bar_draw_ids and len(stop_bar_draw_ids.get(current_node, [])) > 0
+            stop_bar_illuminated = is_stop_bar_illuminated_for_node(current_node)
             
             if not is_runway_clear() or stop_bar_illuminated:
                 # Runway is occupied or stop bar is on, wait and check again
@@ -2518,7 +2783,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
         segment_points, next_start_override = build_taxi_segment_points(
             route,
             route_idx,
-            speed=0.24,
+            speed=effective_speed,
             start_override=start_override
         )
         if not segment_points:
@@ -2563,7 +2828,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
         
         if use_distance_stepping:
             # For runway segments, use distance-based animation like landing_aircraft
-            avg_speed = 0.24  # Taxi speed in pixels per frame
+            avg_speed = effective_speed  # Taxi speed in pixels per frame
             steps = max(int(distance / avg_speed), 1)
             
             def animate_segment(step=0):
@@ -2596,7 +2861,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
                     ux, uy = 0.0, 0.0
                 
                 remaining = aircraft_info.get('segment_remaining_distance', distance)
-                move_dist = min(0.24, remaining)
+                move_dist = min(effective_speed, remaining)
                 step_x = ux * move_dist
                 step_y = uy * move_dist
                 
@@ -2828,7 +3093,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
 # HOME SCREEN DISPLAY
 def build_home_screen():
     """Build the ATC home screen UI matching the provided PNG layout."""
-    global main_canvas  # Make canvas accessible globally
+    global main_canvas, ops_var  # Make canvas and ops mode accessible globally
     
     # Clear any existing widgets
     for widget in app.winfo_children():
@@ -3012,16 +3277,12 @@ def build_home_screen():
         return f"{chosen_prefix}{make_suffix()}"
 
     def get_turnaround_delay_ms():
-        import random
-        rate = tfr_var.get()
-        if rate == "High":
-            return random.randint(15000, 30000)
-        if rate == "Medium":
-            return random.randint(20000, 40000)
-        return random.randint(30000, 60000)
+        """Return 15-minute turnaround time to simulate deboarding, boarding, and fuel uplift."""
+        return 900000  # 15 minutes at 1x speed
 
     def start_departure_from_stand(aircraft_info, stand_node):
         """Convert a parked aircraft into a departure and start pushback."""
+        global next_pushback_release_time
         if not main_canvas:
             return
 
@@ -3034,25 +3295,7 @@ def build_home_screen():
 
         # Pushback targets should be stand-facing N-style nodes so aircraft reverse out then
         # complete the 90-degree turn ready to taxi toward the active runway.
-        stand_pushback_node_map = {
-            "STAND8A": "STAND8N_2",
-            "STAND9A": "STAND1N",
-            "STAND10A": "STAND2N",
-            "STAND11A": "STAND3N",
-            "STAND12A": "STAND4N",
-            "STAND13A": "NS",
-            "STAND14A": "STAND5N",
-            "STAND15A": "STAND6N",
-            "STAND16A": "STAND7N",
-            "STAND17A": "STAND8N",
-            "STAND18A": "STAND18N",
-            "STAND19A": "STAND19N",
-            "STAND20A": "STAND20N",
-            "STAND21A": "STAND21N",
-            "STAND22A": "STAND22N",
-        }
-
-        stand_pushback_node = stand_pushback_node_map.get(stand_node, f"{stand_node[:-1]}N")
+        stand_pushback_node = get_stand_pushback_node(stand_node)
         if stand_pushback_node not in nodes:
             print(f"No valid pushback node found for stand {stand_node}: {stand_pushback_node}")
             return
@@ -3076,9 +3319,20 @@ def build_home_screen():
             add_aircraft_to_status(callsign, 'Departures')
 
         def attempt_pushback():
+            global next_pushback_release_time
             if callsign not in active_aircraft:
                 return
             if aircraft_info.get('node') != stand_node:
+                return
+
+            # Record initial queue time once to arbitrate priority between competing pushbacks.
+            aircraft_info.setdefault('pushback_queue_time', get_simulation_time())
+
+            # Enforce fixed pushback cadence: one pushback release every 2 minutes.
+            # Additional safety checks still apply below.
+            if get_simulation_time() < next_pushback_release_time:
+                aircraft_info['waiting_for_pushback_clearance'] = True
+                aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
                 return
 
             if not is_pushback_path_clear(callsign, stand_node, stand_pushback_node):
@@ -3088,6 +3342,8 @@ def build_home_screen():
 
             aircraft_info['waiting_for_pushback_clearance'] = False
             aircraft_info.pop('pushback_wait_job_id', None)
+            aircraft_info.pop('pushback_queue_time', None)
+            next_pushback_release_time = get_simulation_time() + 120.0
             pushback_aircraft(main_canvas, aircraft_info, stand_pushback_node, final_direction, runway_target=runway_target)
 
         aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
@@ -3096,6 +3352,9 @@ def build_home_screen():
         """Schedule a turnaround so an arriving aircraft later departs."""
         delay_ms = get_turnaround_delay_ms()
         callsign = aircraft_info.get('callsign')
+        
+        # Move to Turnaround status immediately
+        move_aircraft_status(callsign, 'Turnaround')
 
         def begin_departure():
             if callsign not in active_aircraft:
@@ -3112,13 +3371,14 @@ def build_home_screen():
     def seed_initial_aircraft():
         """Seed 5-10 parked aircraft on random stands and schedule turnarounds."""
         if not main_canvas:
-            return
+            return []
         import random
         available_stands = find_available_stands()
         if not available_stands:
-            return
+            return []
         seed_count = min(len(available_stands), random.randint(5, 10))
         seed_stands = random.sample(available_stands, seed_count)
+        seeded_aircraft = []
 
         for stand_node in seed_stands:
             x, y = nodes[stand_node]
@@ -3134,8 +3394,11 @@ def build_home_screen():
                 'direction': direction
             }
             active_aircraft[callsign] = aircraft_info
-            add_aircraft_to_status(callsign, 'Arrivals')
+            # Status will be set to Turnaround by schedule_turnaround
             schedule_turnaround(aircraft_info, stand_node)
+            seeded_aircraft.append((aircraft_info, stand_node))
+
+        return seeded_aircraft
 
     def spawn_landing_aircraft():
         """Spawn a landing aircraft at the appropriate airborne node based on runway direction."""
@@ -3306,13 +3569,43 @@ def build_home_screen():
         activity_job_id = app.after(adjust_delay(delay_ms), schedule_next_activity)
 
     def start_activity():
-        global simulation_running, activity_job_id
+        global simulation_running, activity_job_id, next_pushback_release_time
         if simulation_running:
             return
         clear_existing_aircraft()
         simulation_running = True
-        seed_initial_aircraft()
+        # First pushback can release immediately after Play, then every 2 minutes thereafter.
+        next_pushback_release_time = get_simulation_time()
+        seeded_aircraft = seed_initial_aircraft()
+
+        # Queue all default seeded stand aircraft for departure immediately.
+        # The pushback release gate still enforces one release every 2 minutes,
+        # and path/collision checks still determine whether each can move.
+        for aircraft_info, stand_node in seeded_aircraft:
+            turnaround_job_id = aircraft_info.get('turnaround_job_id')
+            if turnaround_job_id:
+                try:
+                    app.after_cancel(turnaround_job_id)
+                except Exception:
+                    pass
+                aircraft_info.pop('turnaround_job_id', None)
+            start_departure_from_stand(aircraft_info, stand_node)
+
         schedule_next_activity()
+
+    def update_pushback_timer_label():
+        if not pushback_timer_label:
+            return
+
+        if not simulation_running:
+            pushback_timer_label.configure(text="Next pushback: --")
+        else:
+            remaining = max(0.0, next_pushback_release_time - get_simulation_time())
+            mins = int(remaining // 60)
+            secs = int(remaining % 60)
+            pushback_timer_label.configure(text=f"Next pushback: {mins:02d}:{secs:02d}")
+
+        app.after(adjust_delay(250), update_pushback_timer_label)
     
     # Button panel for run and speed control
     button_panel = ctk.CTkFrame(controls_main)
@@ -3353,12 +3646,22 @@ def build_home_screen():
     speed_btn.pack(pady=(0, 10))
     speed_btn_ref.append(speed_btn)
 
+    global pushback_timer_label
+    pushback_timer_label = ctk.CTkLabel(
+        button_panel,
+        text="Next pushback: --",
+        font=("Arial", 12, "bold"),
+        text_color="white"
+    )
+    pushback_timer_label.pack(pady=(0, 5))
+    update_pushback_timer_label()
+
     # ===== BOTTOM SECTION: Status Board =====
     status_frame = ctk.CTkFrame(app)
     status_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-    # Header row with 5 columns
-    columns = ["Departures", "Taxiing", "Runway", "Airborne", "Arrivals"]
+    # Header row with 6 columns
+    columns = ["Departures", "Taxiing", "Runway", "Airborne", "Arrivals", "Turnaround"]
     global status_columns
     status_columns = {}
     
