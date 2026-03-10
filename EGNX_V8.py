@@ -1825,6 +1825,7 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
 
         steps = len(segment_points)
         lookahead_points = 4
+        point_spacing = 0.24
 
         if 'heading' not in aircraft_info:
             if steps > 1:
@@ -1836,15 +1837,26 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 ex, ey = nodes[next_node]
                 aircraft_info['heading'] = math.degrees(math.atan2(ey - sy, ex - sx))
 
-        def animate_segment(step=0):
-            if step >= steps:
+        def _point_at_cursor(cursor):
+            if steps <= 1:
+                return segment_points[0]
+            idx = int(cursor)
+            if idx >= steps - 1:
+                return segment_points[-1]
+            t = cursor - idx
+            x0, y0 = segment_points[idx]
+            x1, y1 = segment_points[idx + 1]
+            return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+
+        def animate_segment(cursor=0.0):
+            if cursor >= max(steps - 1, 0):
                 aircraft_info['route_index'] = route_idx + 1
                 aircraft_info['node'] = next_node
                 aircraft_info['position'] = segment_points[-1]
                 move_through_route()
                 return
 
-            curr_x, curr_y = segment_points[step]
+            curr_x, curr_y = _point_at_cursor(cursor)
 
             runway_exit_idx = aircraft_info.get('runway_exit_idx', len(route) - 1)
             if route_idx > runway_exit_idx and not moved_to_taxiing[0]:
@@ -1877,7 +1889,7 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 rotated_points.extend([curr_x + rx, curr_y + ry])
 
             if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
-                app.after(adjust_delay(200), animate_segment, step)
+                app.after(adjust_delay(200), animate_segment, cursor)
                 return
 
             canvas.coords(aircraft_info['triangle_id'], *rotated_points)
@@ -1894,9 +1906,26 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 decel_distance_traveled += math.hypot(curr_x - prev_x, curr_y - prev_y)
                 aircraft_info['decel_distance_traveled'] = decel_distance_traveled
 
-            app.after(adjust_delay(30), animate_segment, step + 1)
+            # Keep cubic landing deceleration before runway exit, then taxi speed.
+            if route_idx <= runway_exit_idx:
+                decel_total_distance = aircraft_info.get('decel_total_distance', 1000)
+                decel_distance_traveled = aircraft_info.get('decel_distance_traveled', 0.0)
+                if decel_distance_traveled < decel_total_distance * 0.25:
+                    current_speed = 1.6
+                else:
+                    adjusted_distance = decel_distance_traveled - (decel_total_distance * 0.25)
+                    adjusted_total = decel_total_distance * 0.75
+                    decel_progress = min(1.0, adjusted_distance / max(adjusted_total * 0.9, 1))
+                    ease = decel_progress * decel_progress * decel_progress
+                    current_speed = 1.6 - (1.38 * ease)
+                current_speed *= aircraft_info.get('landing_speed_scale', 1.0)
+            else:
+                current_speed = 0.22
 
-        animate_segment()
+            cursor_step = max(0.05, current_speed / max(point_spacing, 0.01))
+            app.after(adjust_delay(30), animate_segment, cursor + cursor_step)
+
+        animate_segment(0.0)
         return True
     
     def move_through_route():
@@ -1930,9 +1959,26 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
         current_node = route[route_idx]
         next_node = route[route_idx + 1]
 
+        # Check if this is a post-runway-exit segment that should use taxi-style segment animation
+        # Use build_taxi_segment_points to create smooth curved paths
+        post_runway_exit_segments = {
+            ("RWY27_B1", "RWY09_C1"),
+            ("RWY09_C1", "RWY09_C1_EXIT"),
+            ("RWY09_C1_EXIT", "C1_HOLD"),
+            ("C1_HOLD", "TXY_C1"),
+            ("RWY09_C1", "RWY27_B1"),
+            ("RWY27_B1", "RWY27_B1_EXIT"),
+            ("RWY27_B1_EXIT", "B1_HOLD"),
+            ("B1_HOLD", "TXY_B1"),
+        }
+        
+        is_post_runway_exit = (current_node, next_node) in post_runway_exit_segments
+        
+        if is_post_runway_exit:
+            # Use taxi-style segment animation with path-based movement
+            return _animate_landing_taxi_style_segment(route_idx, current_node, next_node)
+
         # Keep landing movement on the cubic distance-based profile so runway
-        # touchdown to exit takes ~50s at 1x and scales correctly with speed multiplier.
-        # (Taxi-style segment animation is intentionally not used for landing runway segments.)
         
         start_x, start_y = nodes[current_node]
         end_x, end_y = nodes[next_node]
