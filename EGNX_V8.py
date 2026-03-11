@@ -547,6 +547,14 @@ simulation_running = False
 activity_job_id = None
 schedule_turnaround_cb = None
 
+# Minimum gate turnaround before an arrival can push back (at 1x simulation speed).
+MIN_TURNAROUND_DELAY_MS = 15 * 60 * 1000
+
+# Pushback spacing between departures (at 1x simulation speed).
+MIN_PUSHBACK_GAP_SECONDS = 30
+MAX_PUSHBACK_GAP_SECONDS = 180
+next_pushback_release_time = 0.0
+
 # ==============================
 # SPEED CONTROL HELPER
 def adjust_delay(base_delay_ms):
@@ -3091,6 +3099,7 @@ def build_home_screen():
 
     # Right: Play button for general activity
     def clear_existing_aircraft():
+        global next_pushback_release_time
         if not main_canvas:
             return
         for callsign, ac_info in list(active_aircraft.items()):
@@ -3116,6 +3125,7 @@ def build_home_screen():
                 main_canvas.delete(ac_info['label_id'])
             remove_aircraft_from_status(callsign)
         active_aircraft.clear()
+        next_pushback_release_time = 0.0
 
     def generate_unique_callsign(prefix=None):
         import random
@@ -3141,10 +3151,19 @@ def build_home_screen():
         import random
         rate = tfr_var.get()
         if rate == "High":
-            return random.randint(15000, 30000)
+            return random.randint(15 * 60 * 1000, 30 * 60 * 1000)
         if rate == "Medium":
-            return random.randint(20000, 40000)
-        return random.randint(30000, 60000)
+            return random.randint(20 * 60 * 1000, 40 * 60 * 1000)
+        return random.randint(30 * 60 * 1000, 60 * 60 * 1000)
+
+    def get_seeded_departure_delay_seconds():
+        import random
+        rate = tfr_var.get()
+        if rate == "High":
+            return random.randint(15, 60)
+        if rate == "Medium":
+            return random.randint(20, 90)
+        return random.randint(30, 120)
 
     def start_departure_from_stand(aircraft_info, stand_node):
         """Convert a parked aircraft into a departure and start pushback."""
@@ -3204,9 +3223,18 @@ def build_home_screen():
             add_aircraft_to_status(callsign, 'Departures')
 
         def attempt_pushback():
+            global next_pushback_release_time
+            import random
+
             if callsign not in active_aircraft:
                 return
             if aircraft_info.get('node') != stand_node:
+                return
+
+            now_sim = get_simulation_time()
+            if now_sim < next_pushback_release_time:
+                aircraft_info['waiting_for_pushback_clearance'] = True
+                aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
                 return
 
             if not is_pushback_path_clear(callsign, stand_node, stand_pushback_node):
@@ -3216,14 +3244,33 @@ def build_home_screen():
 
             aircraft_info['waiting_for_pushback_clearance'] = False
             aircraft_info.pop('pushback_wait_job_id', None)
+
+            # Once this pushback starts, reserve the next pushback release at a random
+            # interval between 30 seconds and 3 minutes.
+            next_pushback_release_time = now_sim + random.randint(MIN_PUSHBACK_GAP_SECONDS, MAX_PUSHBACK_GAP_SECONDS)
             pushback_aircraft(main_canvas, aircraft_info, stand_pushback_node, final_direction, runway_target=runway_target)
 
         aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
 
     def schedule_turnaround(aircraft_info, stand_node):
         """Schedule a turnaround so an arriving aircraft later departs."""
-        delay_ms = get_turnaround_delay_ms()
+        delay_ms = max(get_turnaround_delay_ms(), MIN_TURNAROUND_DELAY_MS)
         callsign = aircraft_info.get('callsign')
+
+        def begin_departure():
+            if callsign not in active_aircraft:
+                return
+            if aircraft_info.get('node') != stand_node:
+                return
+            start_departure_from_stand(aircraft_info, stand_node)
+
+        aircraft_info['turnaround_job_id'] = app.after(adjust_delay(delay_ms), begin_departure)
+
+    def schedule_seeded_departure(aircraft_info, stand_node):
+        """Schedule initial stand departures with random timing."""
+
+        callsign = aircraft_info.get('callsign')
+        delay_ms = get_seeded_departure_delay_seconds() * 1000
 
         def begin_departure():
             if callsign not in active_aircraft:
@@ -3238,7 +3285,7 @@ def build_home_screen():
     schedule_turnaround_cb = schedule_turnaround
 
     def seed_initial_aircraft():
-        """Seed 5-10 parked aircraft on random stands and schedule turnarounds."""
+        """Seed 5-10 parked departures on random stands and stagger pushbacks."""
         if not main_canvas:
             return
         import random
@@ -3250,7 +3297,7 @@ def build_home_screen():
 
         for stand_node in seed_stands:
             x, y = nodes[stand_node]
-            callsign = generate_unique_callsign("ARR")
+            callsign = generate_unique_callsign("DEP")
             direction = get_stand_direction(stand_node)
             triangle_id, label_id = draw_aircraft(main_canvas, x, y, callsign, direction, color="blue")
             aircraft_info = {
@@ -3262,8 +3309,8 @@ def build_home_screen():
                 'direction': direction
             }
             active_aircraft[callsign] = aircraft_info
-            add_aircraft_to_status(callsign, 'Arrivals')
-            schedule_turnaround(aircraft_info, stand_node)
+            add_aircraft_to_status(callsign, 'Departures')
+            schedule_seeded_departure(aircraft_info, stand_node)
 
     def spawn_landing_aircraft():
         """Spawn a landing aircraft at the appropriate airborne node based on runway direction."""
