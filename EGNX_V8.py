@@ -50,6 +50,7 @@ nodes = {
     "AR": (1320, 158), "NR": (1320, 283),
     "AS": (1045, 158), "NS": (1045, 283),
     "TXY_A1": (1820, 158),"A1_HOLD": (1820, 120), "RWY27_A1": (1820, 70), "RWY27_A1_ALIGN": (1760, 70), "RWY09_AirBorne": (1920,70),
+    "A2_HOLD": (1790,158),"E2_HOLD":(135,158),"D2_HOLD":(214,137),"B2_HOLD":(1558,137),"C2_HOLD":(645,137),
     "TXY_B1": (1558, 158),"B1_HOLD": (1558, 120), "RWY27_B1": (1558, 70), "RWY27_B1_EXIT": (1558, 92),
     "TXY_C1": (645, 158),"C1_HOLD": (645, 120), "RWY09_C1": (645, 70), "RWY09_C1_EXIT": (645, 92),
     "TXY_D1": (214, 158),"D1_HOLD": (214, 120), "RWY09_D1": (214, 70),
@@ -101,10 +102,11 @@ edges = {
     "RWY09_E1": ["RWY09_E1_ALIGN"],
     "RWY09_E1_ALIGN": ["RWY09_AirBorne"],
     "E1_HOLD": ["RWY09_E1","TXY_E1"],
-    "TXY_D1": ["TXY_E1","D1_HOLD"],
+    "TXY_D1": ["E2_HOLD","D1_HOLD"],
+    "E2_HOLD": ["TXY_E1"],
     "TXY_C1": ["TXY_D1","AQ","C1_HOLD"],
-    "TXY_B1": ["TXY_A1","B1_HOLD"],
-    "TXY_A1": ["AR","A1_HOLD"],
+    "TXY_B1": ["A2_HOLD","B1_HOLD","AR"],
+    "TXY_A1": ["A2_HOLD","A1_HOLD"],
     "AQ": ["STAND19N","AS"],
     "STAND19B": ["STAND19A","STAND19N"],
     "NS": ["AS","NQ","NR","STAND1N","STAND2N","STAND3N","STAND4N","STAND5N","STAND6N","STAND7N","STAND8N"],
@@ -320,7 +322,7 @@ def build_spline_path(route, points_per_segment=20):
 
     return spline_points, spline_route_idx_map
 
-def build_taxi_segment_points(route, route_idx, speed=0.24, min_points=12, start_override=None, corner_cut=10.0):
+def build_taxi_segment_points(route, route_idx, speed=None, min_points=12, start_override=None, corner_cut=10.0):
     """Build points for a taxi segment: straight edge with optional rounded corner near the end.
 
     Returns (points, next_start_override), where next_start_override is a point on the next
@@ -328,6 +330,9 @@ def build_taxi_segment_points(route, route_idx, speed=0.24, min_points=12, start
     """
     if route_idx < 0 or route_idx + 1 >= len(route):
         return [], None
+
+    if speed is None:
+        speed = get_current_taxi_speed()
 
     def _line_points(p0, p1, spacing):
         d = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
@@ -367,8 +372,8 @@ def build_taxi_segment_points(route, route_idx, speed=0.24, min_points=12, start
 
     c = nodes[route[route_idx + 2]]
 
-    # Keep exact node crossing at hold points for procedural behavior.
-    if route[route_idx + 1].endswith('_HOLD'):
+    # Keep exact node crossing at stop bars for procedural behavior.
+    if is_stop_bar_node(route[route_idx + 1]):
         pts = _line_points(a, b, speed)
         if len(pts) < min_points and len(pts) >= 2:
             pts = _line_points(a, b, max(0.01, speed * len(pts) / min_points))
@@ -535,6 +540,9 @@ stop_bar_draw_ids = {}
 stop_bar_off_until = {}  # Track when each stop bar should turn back on (time-based)
 next_departure_release_time = 0.0  # Track when the next departure may be released (time-based)
 runway_protected = True  # Track if runway is protected (stop bars on)
+current_operations_mode = "Normal Ops"
+NORMAL_OPS_TAXI_SPEED = 0.24
+LOW_VIS_TAXI_SPEED = 0.05
 simulation_speed = 1.0  # Speed multiplier for simulation (1x, 10x)
 simulation_time_seconds = 0.0
 last_sim_real_time = time.perf_counter()
@@ -647,8 +655,8 @@ def toggle_graph_visibility():
 
 # ==============================
 # STOP BARS
-# Manual pixel coordinates for stop bar lights at each hold point
-STOP_BAR_POSITIONS = {
+# Manual pixel coordinates for stop bar lights.
+NORMAL_STOP_BAR_POSITIONS = {
     "A1_HOLD": {
         "red": [(1810, 120), (1815, 120), (1820, 120), (1825, 120), (1830, 120), (1835, 120)], 
     },
@@ -666,14 +674,61 @@ STOP_BAR_POSITIONS = {
     }
 }
 
+LOW_VISIBILITY_ONLY_STOP_BAR_POSITIONS = {
+    "A2_HOLD": {"red": [(1790, 148), (1790, 153), (1790, 158), (1790, 163), (1790, 168)]},
+    "B2_HOLD": {"red": [(1548, 137), (1553, 137), (1558,137), (1563, 137), (1568, 137)]},
+    "C2_HOLD": {"red": [(635, 137), (640, 137), (645,137), (650, 137), (655, 137)]},
+    "D2_HOLD": {"red": [(204, 137), (209, 137), (214,137), (219, 137), (224, 137)]},
+    "E2_HOLD": {"red": [(135, 148), (135, 153), (135, 158), (135, 163), (135, 168)]}
+}
+
+LOW_VISIBILITY_STOP_BAR_POSITIONS = {
+    **LOW_VISIBILITY_ONLY_STOP_BAR_POSITIONS,
+}
+
+STOP_BAR_POSITIONS_BY_MODE = {
+    "Normal Ops": NORMAL_STOP_BAR_POSITIONS,
+    "Low Visibility Ops": LOW_VISIBILITY_STOP_BAR_POSITIONS,
+}
+
+
+def get_active_stop_bar_positions():
+    return STOP_BAR_POSITIONS_BY_MODE.get(current_operations_mode, NORMAL_STOP_BAR_POSITIONS)
+
+
+def get_current_taxi_speed():
+    if current_operations_mode == "Low Visibility Ops":
+        return LOW_VIS_TAXI_SPEED
+    return NORMAL_OPS_TAXI_SPEED
+
+
+def get_departure_gap_min_nodes():
+    if current_operations_mode == "Low Visibility Ops":
+        return 5
+    return 3
+
+
+def is_stop_bar_node(node_name):
+    return node_name in get_active_stop_bar_positions()
+
+
+def set_operations_mode(mode):
+    global current_operations_mode
+
+    current_operations_mode = mode
+    stop_bar_off_until.clear()
+    if main_canvas:
+        update_stop_bars(main_canvas)
+
 def draw_stop_bars(canvas):
-    """Draw stop bars at runway hold points using manual pixel coordinates.
+    """Draw stop bars for the currently selected operations mode.
     
     Red stop bar lights are always on, and turn off when a DEPARTING aircraft at that hold
     is cleared to cross (runway is clear). Landing aircraft do NOT affect stop bar state.
     Lights turn back on 2 seconds after turning off.
     """
     global stop_bar_draw_ids, stop_bar_off_until, next_departure_release_time
+    active_stop_bar_positions = get_active_stop_bar_positions()
     
     # Clear existing stop bars
     for items in stop_bar_draw_ids.values():
@@ -691,24 +746,24 @@ def draw_stop_bars(canvas):
         # 1. Aircraft is at a hold point
         # 2. Runway is clear
         # 3. Aircraft is NOT a landing aircraft (doesn't have ignore_stop_bars flag)
-        # 4. No arrival is within 3nm (3 miles) of the runway
+        # 4. No arrival is within the current departure-gap threshold of the runway
         is_landing_aircraft = info.get('ignore_stop_bars', False)
         arrival_too_close = is_arrival_within_5nm()
         
-        if node and node.endswith('_HOLD') and is_runway_clear() and not is_landing_aircraft and not arrival_too_close:
+        if node and is_stop_bar_node(node) and is_runway_clear() and not is_landing_aircraft and not arrival_too_close:
             # If this hold's stop bar isn't already off, turn it off now and set timer
             if (node not in stop_bar_off_until or current_time >= stop_bar_off_until[node]) and current_time >= next_departure_release_time:
                 stop_bar_duration = 5.0
                 stop_bar_off_until[node] = current_time + stop_bar_duration
     
-    for hold_name, positions in STOP_BAR_POSITIONS.items():
+    for hold_name, positions in active_stop_bar_positions.items():
         if not positions.get("red"):
             continue  # Skip if no red positions defined
             
         items = []
         
-        # Red lights are OFF if we're within the timer period AND no arrival is within 3nm (3 miles)
-        # Red lights turn back ON immediately if arrival comes within 3nm
+        # Red lights are OFF if we're within the timer period AND no arrival is within threshold
+        # Red lights turn back ON immediately if arrival comes within threshold
         is_off = hold_name in stop_bar_off_until and current_time < stop_bar_off_until[hold_name] and not is_arrival_within_5nm()
         show_red_lights = not is_off
         
@@ -960,9 +1015,12 @@ def pushback_aircraft(canvas, aircraft_info, target_node, final_direction="right
 
 # ==============================
 # TAXI AIRCRAFT ALONG PATH
-def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
+def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
     """Animate aircraft taxiing from current node to destination using pathfinding."""
     import math
+
+    if speed is None:
+        speed = get_current_taxi_speed()
     
     # Get current node from aircraft info
     current_node = aircraft_info.get('node', 'STAND1N')
@@ -982,7 +1040,9 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
     runway_selector = globals().get('runway_var')
     runway_in_use = runway_selector.get() if runway_selector else None
 
-    if runway_in_use == "27" and destination_node == "A1_HOLD" and (current_node.startswith("STAND") or current_node == "NS"):
+    runway_27_hold_target = "A2_HOLD" if current_operations_mode == "Low Visibility Ops" else "A1_HOLD"
+
+    if runway_in_use == "27" and destination_node == runway_27_hold_target and (current_node.startswith("STAND") or current_node == "NS"):
         best_route = None
         best_route_length = None
         for stand_exit in ("AS", "AR"):
@@ -1053,9 +1113,9 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
             aircraft_info['position'] = nodes[destination_node]
             
             # Check if we've reached a hold point and should proceed to runway
-            if destination_node in ["A1_HOLD", "E1_HOLD"]:
+            if destination_node in ["A1_HOLD", "A2_HOLD", "E1_HOLD"]:
                 # Determine runway entry point based on hold point
-                if destination_node == "A1_HOLD":
+                if destination_node in ["A1_HOLD", "A2_HOLD"]:
                     runway_entry = "RWY27_A1_ALIGN"
                 else:  # E1_HOLD
                     runway_entry = "RWY09_E1_ALIGN"
@@ -1095,13 +1155,13 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
         else:
             aircraft_info['waiting_for_merge_priority'] = False
         
-        # Check if we're about to pass through a HOLD node (departing from it)
+        # Check if we're about to pass through a stop-bar node
         # If so, check if runway is clear before proceeding
-        if current_node.endswith('_HOLD'):
+        if is_stop_bar_node(current_node):
             # Check if stop bar at this hold point is illuminated (red lights on)
             stop_bar_illuminated = current_node in stop_bar_draw_ids and len(stop_bar_draw_ids.get(current_node, [])) > 0
             
-            # Also check if any arrival is within 3nm (3 miles) of the runway
+            # Also check if any arrival is within the current departure-gap threshold
             arrival_too_close = is_arrival_within_5nm()
             
             if not is_runway_clear() or stop_bar_illuminated or arrival_too_close:
@@ -1185,7 +1245,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=0.24):
         
         if use_distance_stepping:
             # For runway segments, use distance-based animation like landing_aircraft
-            avg_speed = 0.24  # Taxi speed in pixels per frame
+            avg_speed = get_current_taxi_speed()
             steps = max(int(distance / avg_speed), 1)
             
             def animate_segment(step=0):
@@ -1464,9 +1524,9 @@ def has_departing_aircraft():
             if status in ['Departures', 'Taxiing']:
                 return True
         
-        # Check if aircraft is at a hold point
+        # Check if aircraft is at a stop bar
         node = info.get('node')
-        if node and node.endswith('_HOLD'):
+        if node and is_stop_bar_node(node):
             return True
     
     return False
@@ -1475,7 +1535,8 @@ def can_spawn_new_arrival(spawn_node_name):
     """Check if a new arrival can spawn at the given spawn node.
     
     Spacing requirement:
-    - Always: >=7 nodes from any arrival on final approach
+    - Normal Ops: >=7 nodes from any arrival on final approach
+    - Low Visibility Ops: >=10 nodes from any arrival on final approach
     
     Args:
         spawn_node_name: The node where the aircraft will spawn ("10m9" or "10m27")
@@ -1485,8 +1546,8 @@ def can_spawn_new_arrival(spawn_node_name):
     
     spawn_idx = RUNWAY_TICK_NODES.index(spawn_node_name)
     
-    # Enforce 7-node separation between arrivals on final approach
-    min_spacing = 7
+    # Enforce arrival spacing minima based on operations mode.
+    min_spacing = 10 if current_operations_mode == "Low Visibility Ops" else 7
     
     # Check all aircraft on the radar path
     for callsign, info in active_aircraft.items():
@@ -1519,9 +1580,13 @@ def is_arrival_within_5_5nm():
     return False
 
 def is_arrival_within_5nm():
-    """Check if any arrival is within 3nm (3 nodes) of the runway center (0m9/0m27)."""
+    """Check if any arrival is within the departure-gap threshold of runway center.
+
+    Normal Ops threshold is 3 nodes and Low Visibility threshold is 4 nodes.
+    """
     center_idx_09 = RUNWAY_TICK_NODES.index("0m9")
     center_idx_27 = RUNWAY_TICK_NODES.index("0m27")
+    min_nodes = get_departure_gap_min_nodes()
 
     for callsign, info in active_aircraft.items():
         node = info.get('node')
@@ -1530,7 +1595,7 @@ def is_arrival_within_5nm():
             if idx is not None:
                 dist_09 = abs(idx - center_idx_09)
                 dist_27 = abs(idx - center_idx_27)
-                if min(dist_09, dist_27) <= 3:
+                if min(dist_09, dist_27) <= min_nodes:
                     return True
     return False
 
@@ -1821,7 +1886,7 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
         segment_points, next_start_override = build_taxi_segment_points(
             route,
             route_idx,
-            speed=0.24,
+            speed=get_current_taxi_speed(),
             start_override=start_override
         )
         if not segment_points:
@@ -1833,7 +1898,7 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
 
         steps = len(segment_points)
         lookahead_points = 4
-        point_spacing = 0.24
+        point_spacing = get_current_taxi_speed()
 
         if 'heading' not in aircraft_info:
             if steps > 1:
@@ -2628,9 +2693,9 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
         # This allows them to taxi straight through the exit point stop bar
         should_ignore_stopbar = aircraft_info.get('ignore_stop_bars', False) and route_idx < 3
         
-        # Check if we're about to pass through a HOLD node (departing from it)
+        # Check if we're about to pass through a stop-bar node
         # Only check if we're not ignoring stop bars
-        if current_node.endswith('_HOLD') and not should_ignore_stopbar:
+        if is_stop_bar_node(current_node) and not should_ignore_stopbar:
             # Check if stop bar at this hold point is illuminated (red lights on)
             stop_bar_illuminated = current_node in stop_bar_draw_ids and len(stop_bar_draw_ids.get(current_node, [])) > 0
             
@@ -2652,7 +2717,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
         segment_points, next_start_override = build_taxi_segment_points(
             route,
             route_idx,
-            speed=0.24,
+            speed=get_current_taxi_speed(),
             start_override=start_override
         )
         if not segment_points:
@@ -2697,7 +2762,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
         
         if use_distance_stepping:
             # For runway segments, use distance-based animation like landing_aircraft
-            avg_speed = 0.24  # Taxi speed in pixels per frame
+            avg_speed = get_current_taxi_speed()
             steps = max(int(distance / avg_speed), 1)
             
             def animate_segment(step=0):
@@ -2730,7 +2795,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
                     ux, uy = 0.0, 0.0
                 
                 remaining = aircraft_info.get('segment_remaining_distance', distance)
-                move_dist = min(0.24, remaining)
+                move_dist = min(get_current_taxi_speed(), remaining)
                 step_x = ux * move_dist
                 step_y = uy * move_dist
                 
@@ -3015,9 +3080,21 @@ def build_home_screen():
     ops_frame.pack(side="left", padx=20, pady=10)
     
     ctk.CTkLabel(ops_frame, text="Operations", font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 10))
-    ops_var = tk.StringVar(value="Normal Ops")
-    ctk.CTkRadioButton(ops_frame, text="Normal Ops", variable=ops_var, value="Normal Ops").pack(anchor="w", pady=5)
-    ctk.CTkRadioButton(ops_frame, text="Low Visibility Ops", variable=ops_var, value="Low Visibility Ops").pack(anchor="w", pady=5)
+    ops_var = tk.StringVar(value=current_operations_mode)
+    ctk.CTkRadioButton(
+        ops_frame,
+        text="Normal Ops",
+        variable=ops_var,
+        value="Normal Ops",
+        command=lambda: set_operations_mode(ops_var.get()),
+    ).pack(anchor="w", pady=5)
+    ctk.CTkRadioButton(
+        ops_frame,
+        text="Low Visibility Ops",
+        variable=ops_var,
+        value="Low Visibility Ops",
+        command=lambda: set_operations_mode(ops_var.get()),
+    ).pack(anchor="w", pady=5)
 
     # Middle-left: Traffic Flow Rate
     tfr_frame = ctk.CTkFrame(controls_main)
@@ -3207,7 +3284,10 @@ def build_home_screen():
         runway = runway_var.get()
         # Runway 09 departures taxi toward E1 (west/left), runway 27 departures taxi toward A1 (east/right)
         final_direction = "left" if runway == "09" else "right"
-        runway_target = "A1_HOLD" if runway == "27" else "E1_HOLD"
+        if runway == "27":
+            runway_target = "A2_HOLD" if current_operations_mode == "Low Visibility Ops" else "A1_HOLD"
+        else:
+            runway_target = "E1_HOLD"
 
         # Special pushback heading handling for side stands.
         # For runway 27, stands 19/20 should remain south-facing during most of pushback,
