@@ -51,6 +51,10 @@ nodes = {
     "AS": (1045, 158), "NS": (1045, 283),
     "TXY_A1": (1820, 158),"A1_HOLD": (1820, 120), "RWY27_A1": (1820, 70), "RWY27_A1_ALIGN": (1760, 70), "RWY09_AirBorne": (1920,70),
     "A2_HOLD": (1790,158),"E2_HOLD":(135,158),"D2_HOLD":(214,137),"B2_HOLD":(1558,137),"C2_HOLD":(645,137),
+    "A3": (1510, 158), "A4": (1180, 158), "A5": (886, 158), "A6": (560, 158), "A7": (315, 158),
+    "S1": (1730, 158), "S2": (1670, 158), "S3": (1610, 158), "S4": (1450, 158), "S5": (1390, 158), "S6": (1250, 158),"S7": (1120, 158), 
+    "S8": (965, 158), "S9": (829, 158), "S10": (710, 158), "S11": (499, 158), "S12": (438, 158), "S13": (377, 158), "S14": (265, 158), "S15": (174, 158),
+    "Stand_Stop_Bar": (1045, 227),
     "TXY_B1": (1558, 158),"B1_HOLD": (1558, 120), "RWY27_B1": (1558, 70), "RWY27_B1_EXIT": (1558, 92),
     "TXY_C1": (645, 158),"C1_HOLD": (645, 120), "RWY09_C1": (645, 70), "RWY09_C1_EXIT": (645, 92),
     "TXY_D1": (214, 158),"D1_HOLD": (214, 120), "RWY09_D1": (214, 70),
@@ -102,20 +106,26 @@ edges = {
     "RWY09_E1": ["RWY09_E1_ALIGN"],
     "RWY09_E1_ALIGN": ["RWY09_AirBorne"],
     "E1_HOLD": ["RWY09_E1","TXY_E1"],
-    "TXY_D1": ["E2_HOLD","D1_HOLD"],
-    "E2_HOLD": ["TXY_E1"],
-    "TXY_C1": ["TXY_D1","AQ","C1_HOLD"],
-    "TXY_B1": ["A2_HOLD","B1_HOLD","AR"],
+    "D1_HOLD": ["D2_HOLD"],
+    "TXY_D1": ["S14","D2_HOLD","S15"],
+    "E2_HOLD": ["TXY_E1","S15"],
+    "TXY_C1": ["TXY_D1","AQ","C2_HOLD","S10"], "C2_HOLD": ["C1_HOLD"],
+    "TXY_B1": ["A2_HOLD","B2_HOLD","AR","A3","S3"],
+    "B2_HOLD": ["B1_HOLD",],
     "TXY_A1": ["A2_HOLD","A1_HOLD"],
-    "AQ": ["STAND19N","AS"],
+    "AQ": ["STAND19N","AS","S10","S9"],
+    "AS": ["S8","S7","Stand_Stop_Bar"],
+    "A7": ["S14", "S13"], "S12": ["S13", "S11"], "A6": ["S11", "TXY_C1"],
+    "A5": ["S9", "S8"], "A4": ["S6", "S7"], "S4": ["S5", "A3"],
+    "S2": ["S3", "S1"], "S1": ["A2_HOLD"],
     "STAND19B": ["STAND19A","STAND19N"],
-    "NS": ["AS","NQ","NR","STAND1N","STAND2N","STAND3N","STAND4N","STAND5N","STAND6N","STAND7N","STAND8N"],
+    "NS": ["AS","NQ","NR","STAND1N","STAND2N","STAND3N","STAND4N","STAND5N","STAND6N","STAND7N","STAND8N", "Stand_Stop_Bar"],   
     "NQ": ["STAND1N","STAND2N","STAND3N","STAND4N","STAND8N_2","STAND20N","STAND19N"],
     "STAND20N": ["STAND20B"],
     "STAND20A": ["STAND20B"],
     "STAND8B": ["STAND8N_2","STAND8A"],
     "NR": ["STAND5N","STAND6N","STAND7N","STAND8N","STAND18N","STAND22N"],
-    "AR": ["AS","NR","TXY_B1"],
+    "AR": ["AS","NR","TXY_B1","STAND21N","S6","S5"],
     "STAND1b": ["STAND1N","STAND1a"],
     "STAND2b": ["STAND2N","STAND2a"],
     "STAND3b": ["STAND3N","STAND3a"],
@@ -704,7 +714,7 @@ def get_current_taxi_speed():
 
 def get_departure_gap_min_nodes():
     if current_operations_mode == "Low Visibility Ops":
-        return 5
+        return 6
     return 3
 
 
@@ -3449,7 +3459,7 @@ def build_home_screen():
             if len(path_nodes) < 2:
                 return
 
-            segment_duration_ms = 25000
+            segment_duration_ms = 28000
             frame_interval_ms = 50
             steps_per_segment = max(1, int(segment_duration_ms / frame_interval_ms))
             dot_radius = 3
