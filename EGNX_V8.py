@@ -689,11 +689,25 @@ LOW_VISIBILITY_ONLY_STOP_BAR_POSITIONS = {
     "B2_HOLD": {"red": [(1548, 137), (1553, 137), (1558,137), (1563, 137), (1568, 137)]},
     "C2_HOLD": {"red": [(635, 137), (640, 137), (645,137), (650, 137), (655, 137)]},
     "D2_HOLD": {"red": [(204, 137), (209, 137), (214,137), (219, 137), (224, 137)]},
-    "E2_HOLD": {"red": [(135, 148), (135, 153), (135, 158), (135, 163), (135, 168)]}
+    "E2_HOLD": {"red": [(135, 148), (135, 153), (135, 158), (135, 163), (135, 168)]}, 
+}
+
+# Draw-only stop bars for Low Visibility Ops. These remain visual and do not
+# participate in hold/runway-occupancy gating logic.
+LOW_VISIBILITY_VISUAL_ONLY_STOP_BAR_POSITIONS = {
+    "A3": {"red": [(1510, 148),(1510, 153),(1510, 158),(1510, 163),(1510, 168)]},
+    "A4": {"red": [(1180, 148), (1180, 153), (1180, 158), (1180, 163), (1180, 168)]}, 
+    "A5": {"red": [(886, 148), (886, 153), (886, 158), (886, 163), (886, 168)]}, 
+    "A6": {"red": [(560, 148), (560, 153), (560, 158), (560, 163), (560, 168)]}, 
+    "A7": {"red": [(315, 148), (315, 153), (315, 158), (315, 163), (315, 168)]},
+    "Stand_Stop_Bar": {"red": [(1035, 227), (1040, 227), (1045, 227), (1050, 227), (1055, 227)]},
+    "STAND19N": {"red": [(761, 227), (766, 227), (771, 227), (776, 227), (781, 227)]},
+    "STAND21N": {"red": [(1310, 227), (1315, 227), (1320, 227), (1325, 227), (1330, 227)]},
 }
 
 LOW_VISIBILITY_STOP_BAR_POSITIONS = {
     **LOW_VISIBILITY_ONLY_STOP_BAR_POSITIONS,
+    **LOW_VISIBILITY_VISUAL_ONLY_STOP_BAR_POSITIONS,
 }
 
 STOP_BAR_POSITIONS_BY_MODE = {
@@ -701,9 +715,51 @@ STOP_BAR_POSITIONS_BY_MODE = {
     "Low Visibility Ops": LOW_VISIBILITY_STOP_BAR_POSITIONS,
 }
 
+STOP_BAR_CONTROLLED_NODES_BY_MODE = {
+    "Normal Ops": set(NORMAL_STOP_BAR_POSITIONS.keys()),
+    "Low Visibility Ops": set(LOW_VISIBILITY_ONLY_STOP_BAR_POSITIONS.keys()),
+}
+
 
 def get_active_stop_bar_positions():
     return STOP_BAR_POSITIONS_BY_MODE.get(current_operations_mode, NORMAL_STOP_BAR_POSITIONS)
+
+
+def get_active_controlled_stop_bar_nodes():
+    return STOP_BAR_CONTROLLED_NODES_BY_MODE.get(
+        current_operations_mode,
+        set(NORMAL_STOP_BAR_POSITIONS.keys())
+    )
+
+
+def get_active_visual_only_stop_bar_nodes():
+    active_nodes = set(get_active_stop_bar_positions().keys())
+    return active_nodes - get_active_controlled_stop_bar_nodes()
+
+
+def is_aircraft_approaching_node(node_name, proximity_px=10.0):
+    """Return True when an aircraft is near or routing into the specified node."""
+    if node_name not in nodes:
+        return False
+
+    target_x, target_y = nodes[node_name]
+
+    for info in active_aircraft.values():
+        current_node = info.get('node')
+        if current_node == node_name:
+            return True
+
+        route = info.get('route') or []
+        route_idx = info.get('route_index', 0)
+        if route and 0 <= route_idx < len(route) - 1:
+            if route[route_idx + 1] == node_name:
+                return True
+
+        pos = info.get('position')
+        if pos and math.hypot(pos[0] - target_x, pos[1] - target_y) <= proximity_px:
+            return True
+
+    return False
 
 
 def get_current_taxi_speed():
@@ -718,8 +774,14 @@ def get_departure_gap_min_nodes():
     return 3
 
 
+def get_stop_bar_off_duration_seconds():
+    if current_operations_mode == "Low Visibility Ops":
+        return 30.0
+    return 5.0
+
+
 def is_stop_bar_node(node_name):
-    return node_name in get_active_stop_bar_positions()
+    return node_name in get_active_controlled_stop_bar_nodes()
 
 
 def set_operations_mode(mode):
@@ -735,10 +797,12 @@ def draw_stop_bars(canvas):
     
     Red stop bar lights are always on, and turn off when a DEPARTING aircraft at that hold
     is cleared to cross (runway is clear). Landing aircraft do NOT affect stop bar state.
-    Lights turn back on 2 seconds after turning off.
+    Lights turn back on after a mode-specific off period.
     """
     global stop_bar_draw_ids, stop_bar_off_until, next_departure_release_time
     active_stop_bar_positions = get_active_stop_bar_positions()
+    controlled_stop_bar_nodes = get_active_controlled_stop_bar_nodes()
+    visual_only_stop_bar_nodes = get_active_visual_only_stop_bar_nodes()
     
     # Clear existing stop bars
     for items in stop_bar_draw_ids.values():
@@ -763,8 +827,14 @@ def draw_stop_bars(canvas):
         if node and is_stop_bar_node(node) and is_runway_clear() and not is_landing_aircraft and not arrival_too_close:
             # If this hold's stop bar isn't already off, turn it off now and set timer
             if (node not in stop_bar_off_until or current_time >= stop_bar_off_until[node]) and current_time >= next_departure_release_time:
-                stop_bar_duration = 5.0
+                stop_bar_duration = get_stop_bar_off_duration_seconds()
                 stop_bar_off_until[node] = current_time + stop_bar_duration
+
+    # Visual-only stop bars deluminate when traffic approaches those nodes.
+    stop_bar_duration = get_stop_bar_off_duration_seconds()
+    for hold_name in visual_only_stop_bar_nodes:
+        if is_aircraft_approaching_node(hold_name):
+            stop_bar_off_until[hold_name] = current_time + stop_bar_duration
     
     for hold_name, positions in active_stop_bar_positions.items():
         if not positions.get("red"):
@@ -772,9 +842,12 @@ def draw_stop_bars(canvas):
             
         items = []
         
-        # Red lights are OFF if we're within the timer period AND no arrival is within threshold
-        # Red lights turn back ON immediately if arrival comes within threshold
-        is_off = hold_name in stop_bar_off_until and current_time < stop_bar_off_until[hold_name] and not is_arrival_within_5nm()
+        if hold_name in controlled_stop_bar_nodes:
+            # Controlled stop bars are tied to runway protection logic.
+            is_off = hold_name in stop_bar_off_until and current_time < stop_bar_off_until[hold_name] and not is_arrival_within_5nm()
+        else:
+            # Visual-only stop bars only use their local approach timer.
+            is_off = hold_name in stop_bar_off_until and current_time < stop_bar_off_until[hold_name]
         show_red_lights = not is_off
         
         # Draw red stop bar lights
