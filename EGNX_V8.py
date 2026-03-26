@@ -109,23 +109,23 @@ edges = {
     "D1_HOLD": ["D2_HOLD"],
     "TXY_D1": ["S14","D2_HOLD","S15"],
     "E2_HOLD": ["TXY_E1","S15"],
-    "TXY_C1": ["TXY_D1","AQ","C2_HOLD","S10"], "C2_HOLD": ["C1_HOLD"],
-    "TXY_B1": ["A2_HOLD","B2_HOLD","AR","A3","S3"],
+    "TXY_C1": ["C2_HOLD","S10","A6"], "C2_HOLD": ["C1_HOLD"],
+    "TXY_B1": ["B2_HOLD","A3","S3"],
     "B2_HOLD": ["B1_HOLD",],
     "TXY_A1": ["A2_HOLD","A1_HOLD"],
-    "AQ": ["STAND19N","AS","S10","S9"],
+    "AQ": ["STAND19N","S10","S9"],
     "AS": ["S8","S7","Stand_Stop_Bar"],
     "A7": ["S14", "S13"], "S12": ["S13", "S11"], "A6": ["S11", "TXY_C1"],
     "A5": ["S9", "S8"], "A4": ["S6", "S7"], "S4": ["S5", "A3"],
     "S2": ["S3", "S1"], "S1": ["A2_HOLD"],
     "STAND19B": ["STAND19A","STAND19N"],
-    "NS": ["AS","NQ","NR","STAND1N","STAND2N","STAND3N","STAND4N","STAND5N","STAND6N","STAND7N","STAND8N", "Stand_Stop_Bar"],   
+    "NS": ["Stand_Stop_Bar","NQ","NR","STAND1N","STAND2N","STAND3N","STAND4N","STAND5N","STAND6N","STAND7N","STAND8N", "Stand_Stop_Bar"],   
     "NQ": ["STAND1N","STAND2N","STAND3N","STAND4N","STAND8N_2","STAND20N","STAND19N"],
     "STAND20N": ["STAND20B"],
     "STAND20A": ["STAND20B"],
     "STAND8B": ["STAND8N_2","STAND8A"],
-    "NR": ["STAND5N","STAND6N","STAND7N","STAND8N","STAND18N","STAND22N"],
-    "AR": ["AS","NR","TXY_B1","STAND21N","S6","S5"],
+    "NR": ["STAND5N","STAND6N","STAND7N","STAND8N","STAND18N","STAND22N","STAND21N"],
+    "AR": ["STAND21N","S6","S5"],
     "STAND1b": ["STAND1N","STAND1a"],
     "STAND2b": ["STAND2N","STAND2a"],
     "STAND3b": ["STAND3N","STAND3a"],
@@ -557,6 +557,7 @@ simulation_speed = 1.0  # Speed multiplier for simulation (1x, 10x)
 simulation_time_seconds = 0.0
 last_sim_real_time = time.perf_counter()
 main_canvas = None  # Global reference to the canvas
+show_template_s_node_stop_bars = False  # Toggle S-node template stop bars via checkbox
 status_columns = {}  # Global reference to status board columns
 aircraft_labels = {}  # Track labels in each status column
 graph_element_ids = []  # Store all graph element IDs for hiding/showing
@@ -705,6 +706,28 @@ LOW_VISIBILITY_VISUAL_ONLY_STOP_BAR_POSITIONS = {
     "STAND21N": {"red": [(1310, 227), (1315, 227), (1320, 227), (1325, 227), (1330, 227)]},
 }
 
+# Template: fill in red-light pixel coordinates for S-node stop bars.
+# When the "Stop bars" checkbox is enabled, any populated entries here are drawn.
+# Example format:
+# "S4": {"red": [(1450, 148), (1450, 153), (1450, 158), (1450, 163), (1450, 168)]}
+S_NODE_STOP_BAR_TEMPLATE = {
+    "S1": {"red": [(1730, 148), (1730, 153), (1730, 158), (1730, 163), (1730, 168)]},
+    "S2": {"red": [(1670, 148), (1670, 153), (1670, 158), (1670, 163), (1670, 168)]},
+    "S3": {"red": [(1610, 148), (1610, 153), (1610, 158), (1610, 163), (1610, 168)]},
+    "S4": {"red": [(1450, 148), (1450, 153), (1450, 158), (1450, 163), (1450, 168)]},
+    "S5": {"red": [(1390, 148), (1390, 153), (1390, 158), (1390, 163), (1390, 168)]},
+    "S6": {"red": [(1250, 148), (1250, 153), (1250, 158), (1250, 163), (1250, 168)]},
+    "S7": {"red": [(1120, 148), (1120, 153), (1120, 158), (1120, 163), (1120, 168)]},
+    "S8": {"red": [(965, 148), (965, 153), (965, 158), (965, 163), (965, 168)]},
+    "S9": {"red": [(829, 148), (829, 153), (829, 158), (829, 163), (829, 168)]},
+    "S10": {"red": [(710, 148), (710, 153), (710, 158), (710, 163), (710, 168)]},
+    "S11": {"red": [(499, 148), (499, 153), (499, 158), (499, 163), (499, 168)]},
+    "S12": {"red": [(438, 148), (438, 153), (438, 158), (438, 163), (438, 168)]},
+    "S13": {"red": [(377, 148), (377, 153), (377, 158), (377, 163), (377, 168)]},
+    "S14": {"red": [(265, 148), (265, 153), (265, 158), (265, 163), (265, 168)]},
+    "S15": {"red": [(174, 148), (174, 153), (174, 158), (174, 163), (174, 168)]},
+}
+
 LOW_VISIBILITY_STOP_BAR_POSITIONS = {
     **LOW_VISIBILITY_ONLY_STOP_BAR_POSITIONS,
     **LOW_VISIBILITY_VISUAL_ONLY_STOP_BAR_POSITIONS,
@@ -720,9 +743,43 @@ STOP_BAR_CONTROLLED_NODES_BY_MODE = {
     "Low Visibility Ops": set(LOW_VISIBILITY_ONLY_STOP_BAR_POSITIONS.keys()),
 }
 
+# Low-visibility sections with one-aircraft occupancy.
+LOW_VISIBILITY_SINGLE_AIRCRAFT_SECTIONS = {
+    "A2_HOLD",
+    "A3",
+    "A4",
+    "STAND21N",
+    "Stand_Stop_Bar",
+    "A5",
+    "STAND19N",
+    "A6",
+    "A7",
+    "E2_HOLD",
+}
+
+# Low-visibility taxi blocks: the upstream stop bar can only deluminate when
+# all nodes in the next block are clear.
+LOW_VISIBILITY_STOP_BAR_BLOCKS = {
+    # Blocks defined as the area between this stop bar and the next one ahead
+    # in the outbound flow toward runway-holding points.
+    "A3": {"TXY_B1", "S3", "S2", "S1","A2_HOLD"},
+    # Priority rule: when A4 and STAND21N are both waiting, STAND21N goes first.
+    # Keep STAND21N in A4's downstream block, but do not include A4 in STAND21N's block.
+    "A4": {"S4", "S5", "AR", "S6","A3", "STAND21N"},
+    "STAND21N": {"AR","S5","S4", "A3","S6"},
+    "A5": {"AQ", "S9","S10", "TXY_C1", "STAND19N",},
+    "A6": {"S11", "S12", "S13", "A7"},
+    "A7": {"S14","TXY_D1", "S15","E2_HOLD"},
+    "Stand_Stop_Bar": {"AS", "S7", "S8","A4","A5"},
+    "STAND19N": {"AQ", "S10","TXY_C1", "S9", "A6", "A5"},
+}
+
 
 def get_active_stop_bar_positions():
-    return STOP_BAR_POSITIONS_BY_MODE.get(current_operations_mode, NORMAL_STOP_BAR_POSITIONS)
+    active = dict(STOP_BAR_POSITIONS_BY_MODE.get(current_operations_mode, NORMAL_STOP_BAR_POSITIONS))
+    if show_template_s_node_stop_bars:
+        active.update(S_NODE_STOP_BAR_TEMPLATE)
+    return active
 
 
 def get_active_controlled_stop_bar_nodes():
@@ -737,7 +794,11 @@ def get_active_visual_only_stop_bar_nodes():
     return active_nodes - get_active_controlled_stop_bar_nodes()
 
 
-def is_aircraft_approaching_node(node_name, proximity_px=10.0):
+def get_active_stop_bar_nodes():
+    return set(get_active_stop_bar_positions().keys())
+
+
+def is_aircraft_approaching_node(node_name, proximity_px=10.0, require_proximity=False):
     """Return True when an aircraft is near or routing into the specified node."""
     if node_name not in nodes:
         return False
@@ -746,13 +807,29 @@ def is_aircraft_approaching_node(node_name, proximity_px=10.0):
 
     for info in active_aircraft.values():
         current_node = info.get('node')
-        if current_node == node_name:
-            return True
-
         route = info.get('route') or []
         route_idx = info.get('route_index', 0)
+
+        # For proximity-based checks (visual stop bars), only consider aircraft
+        # that are actively taxiing on a route to avoid pre-clearing bars while
+        # aircraft are parked at a node after pushback.
+        if require_proximity and not route:
+            continue
+
+        if current_node == node_name:
+            if require_proximity:
+                if route and 0 <= route_idx < len(route) - 1:
+                    return True
+            else:
+                return True
+
         if route and 0 <= route_idx < len(route) - 1:
             if route[route_idx + 1] == node_name:
+                if require_proximity:
+                    pos = info.get('position')
+                    if pos and math.hypot(pos[0] - target_x, pos[1] - target_y) <= proximity_px:
+                        return True
+                    continue
                 return True
 
         pos = info.get('position')
@@ -760,6 +837,66 @@ def is_aircraft_approaching_node(node_name, proximity_px=10.0):
             return True
 
     return False
+
+
+def is_low_visibility_block_clear(stop_bar_node):
+    """Return True when the configured downstream low-vis block is unoccupied."""
+    if current_operations_mode != "Low Visibility Ops":
+        return True
+
+    block_nodes = LOW_VISIBILITY_STOP_BAR_BLOCKS.get(stop_bar_node)
+    if not block_nodes:
+        return True
+
+    for block_node in block_nodes:
+        if is_low_visibility_section_occupied(block_node):
+            return False
+
+    return True
+
+
+def is_low_visibility_section_occupied(section_node, exclude_callsign=None, proximity_px=18.0):
+    """Return True when another aircraft is at or entering a mapped low-vis block node."""
+    if current_operations_mode != "Low Visibility Ops":
+        return False
+    if section_node not in nodes:
+        return False
+
+    section_pos = nodes.get(section_node)
+    for other_callsign, info in active_aircraft.items():
+        if other_callsign == exclude_callsign:
+            continue
+
+        node = info.get('node')
+        if node == section_node:
+            return True
+
+        route = info.get('route') or []
+        route_idx = info.get('route_index', 0)
+        if route and 0 <= route_idx < len(route) - 1:
+            if route[route_idx + 1] == section_node:
+                pos = info.get('position')
+                if not section_pos or not pos or math.hypot(pos[0] - section_pos[0], pos[1] - section_pos[1]) <= proximity_px:
+                    return True
+
+    return False
+
+
+def is_low_visibility_section_entry_allowed(callsign, current_node, next_node):
+    """Return True when low-vis section capacity and downstream block checks pass."""
+    if current_operations_mode != "Low Visibility Ops":
+        return True
+
+    if next_node in LOW_VISIBILITY_SINGLE_AIRCRAFT_SECTIONS:
+        if is_low_visibility_section_occupied(next_node, exclude_callsign=callsign):
+            return False
+
+    block_nodes = LOW_VISIBILITY_STOP_BAR_BLOCKS.get(current_node, set())
+    for block_node in block_nodes:
+        if is_low_visibility_section_occupied(block_node, exclude_callsign=callsign):
+            return False
+
+    return True
 
 
 def get_current_taxi_speed():
@@ -789,6 +926,14 @@ def set_operations_mode(mode):
 
     current_operations_mode = mode
     stop_bar_off_until.clear()
+    if main_canvas:
+        update_stop_bars(main_canvas)
+
+
+def set_template_s_node_stop_bars_enabled(enabled):
+    """Toggle optional S-node template stop bars from the UI checkbox."""
+    global show_template_s_node_stop_bars
+    show_template_s_node_stop_bars = bool(enabled)
     if main_canvas:
         update_stop_bars(main_canvas)
 
@@ -824,7 +969,7 @@ def draw_stop_bars(canvas):
         is_landing_aircraft = info.get('ignore_stop_bars', False)
         arrival_too_close = is_arrival_within_5nm()
         
-        if node and is_stop_bar_node(node) and is_runway_clear() and not is_landing_aircraft and not arrival_too_close:
+        if node and is_stop_bar_node(node) and is_runway_clear() and not is_landing_aircraft and not arrival_too_close and is_low_visibility_block_clear(node):
             # If this hold's stop bar isn't already off, turn it off now and set timer
             if (node not in stop_bar_off_until or current_time >= stop_bar_off_until[node]) and current_time >= next_departure_release_time:
                 stop_bar_duration = get_stop_bar_off_duration_seconds()
@@ -833,7 +978,7 @@ def draw_stop_bars(canvas):
     # Visual-only stop bars deluminate when traffic approaches those nodes.
     stop_bar_duration = get_stop_bar_off_duration_seconds()
     for hold_name in visual_only_stop_bar_nodes:
-        if is_aircraft_approaching_node(hold_name):
+        if is_aircraft_approaching_node(hold_name, proximity_px=6.0, require_proximity=True) and is_low_visibility_block_clear(hold_name):
             stop_bar_off_until[hold_name] = current_time + stop_bar_duration
     
     for hold_name, positions in active_stop_bar_positions.items():
@@ -846,8 +991,11 @@ def draw_stop_bars(canvas):
             # Controlled stop bars are tied to runway protection logic.
             is_off = hold_name in stop_bar_off_until and current_time < stop_bar_off_until[hold_name] and not is_arrival_within_5nm()
         else:
-            # Visual-only stop bars only use their local approach timer.
+            # Visual-only stop bars use local approach timer and optional
+            # low-visibility downstream block occupancy checks.
             is_off = hold_name in stop_bar_off_until and current_time < stop_bar_off_until[hold_name]
+            if not is_low_visibility_block_clear(hold_name):
+                is_off = False
         show_red_lights = not is_off
         
         # Draw red stop bar lights
@@ -1221,6 +1369,13 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
         current_node = route[route_idx]
         next_node = route[route_idx + 1]
 
+        if not is_low_visibility_section_entry_allowed(aircraft_info['callsign'], current_node, next_node):
+            aircraft_info['waiting_at_hold'] = True
+            app.after(adjust_delay(500), move_to_next_node)
+            if main_canvas:
+                update_stop_bars(main_canvas)
+            return
+
         # Merge priority rule at AR: traffic from AS has priority over traffic from NR.
         # If this aircraft is NR->AR, hold and retry until AS-priority conflict clears.
         if current_node == "NR" and next_node == "AR":
@@ -1238,30 +1393,38 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
         else:
             aircraft_info['waiting_for_merge_priority'] = False
         
-        # Check if we're about to pass through a stop-bar node
-        # If so, check if runway is clear before proceeding
-        if is_stop_bar_node(current_node):
-            # Check if stop bar at this hold point is illuminated (red lights on)
+        # Stop-bar handling.
+        # All active stop bars can hold taxiing traffic when illuminated.
+        # Controlled stop bars additionally require runway and arrival-gap checks.
+        active_stop_bar_nodes = get_active_stop_bar_nodes()
+        controlled_stop_bar_nodes = get_active_controlled_stop_bar_nodes()
+        if current_node in active_stop_bar_nodes:
             stop_bar_illuminated = current_node in stop_bar_draw_ids and len(stop_bar_draw_ids.get(current_node, [])) > 0
-            
-            # Also check if any arrival is within the current departure-gap threshold
-            arrival_too_close = is_arrival_within_5nm()
-            
-            if not is_runway_clear() or stop_bar_illuminated or arrival_too_close:
-                # Runway is occupied, stop bar is on, or arrival is too close - wait and check again
+
+            if stop_bar_illuminated:
                 aircraft_info['waiting_at_hold'] = True
-                app.after(adjust_delay(1000), move_to_next_node)  # Check again
-                # Update stop bars in case this aircraft's presence changes the state
+                app.after(adjust_delay(1000), move_to_next_node)
                 if main_canvas:
                     update_stop_bars(main_canvas)
                 return
-            else:
-                # Runway is clear, stop bar is off, and no arrivals too close - proceed and update status
+
+            if current_node in controlled_stop_bar_nodes:
+                arrival_too_close = is_arrival_within_5nm()
+
+                if not is_runway_clear() or arrival_too_close:
+                    aircraft_info['waiting_at_hold'] = True
+                    app.after(adjust_delay(1000), move_to_next_node)
+                    if main_canvas:
+                        update_stop_bars(main_canvas)
+                    return
+
+                # Controlled hold crossed: aircraft is entering runway flow.
                 aircraft_info['waiting_at_hold'] = False
                 move_aircraft_status(aircraft_info['callsign'], 'Runway')
-                # Update stop bars to show runway is now occupied
                 if main_canvas:
                     update_stop_bars(main_canvas)
+            else:
+                aircraft_info['waiting_at_hold'] = False
         
         start_x, start_y = nodes[current_node]
         end_x, end_y = nodes[next_node]
@@ -2771,6 +2934,13 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
         # Get current and next node positions
         current_node = route[route_idx]
         next_node = route[route_idx + 1]
+
+        if not is_low_visibility_section_entry_allowed(aircraft_info['callsign'], current_node, next_node):
+            aircraft_info['waiting_at_hold'] = True
+            app.after(adjust_delay(500), move_to_next_node)
+            if main_canvas:
+                update_stop_bars(main_canvas)
+            return
         
         # For landing aircraft, ignore stop bars for the first few nodes after runway exit
         # This allows them to taxi straight through the exit point stop bar
@@ -3207,8 +3377,12 @@ def build_home_screen():
     lvp_adaptive_seq_var = tk.BooleanVar(value=False)
     lvp_StopBar_sep_var = tk.BooleanVar(value=False)
     
-    # Stop bars are always enabled independently, checkbox is non-functional
-    ctk.CTkCheckBox(lvp_frame, text="Stop bars", variable=lvp_StopBar_sep_var).pack(anchor="w", pady=5)
+    ctk.CTkCheckBox(
+        lvp_frame,
+        text="Stop bars",
+        variable=lvp_StopBar_sep_var,
+        command=lambda: set_template_s_node_stop_bars_enabled(lvp_StopBar_sep_var.get()),
+    ).pack(anchor="w", pady=5)
     ctk.CTkCheckBox(lvp_frame, text="Reduced separation", variable=lvp_reduced_sep_var).pack(anchor="w", pady=5)
     ctk.CTkCheckBox(lvp_frame, text="Adaptive sequencing", variable=lvp_adaptive_seq_var).pack(anchor="w", pady=5)
     
