@@ -29,7 +29,7 @@ nodes = {
     "STAND5N": (1104, 283), "STAND6N": (1155, 283),
     "STAND7N": (1206, 283), "STAND8N": (1256, 283),
     "STAND8N_2": (784, 283), "STAND22N": (1320, 288),
-    "STAND19N": (771,227), "STAND21N": (1320,227),
+    "STAND19N": (771,200), "STAND21N": (1320,200),
     "STAND20N": (771, 288), "STAND18N": (1307, 283),
     "STAND8A": (784, 348), "STAND8B": (784, 326),
     "STAND9A": (835, 348), "STAND9B": (835, 326),
@@ -46,6 +46,8 @@ nodes = {
     "STAND20A": (708, 288), "STAND20B": (730, 288),
     "STAND21A": (1385, 227), "STAND21B": (1363, 227),
     "STAND22A": (1385, 288), "STAND22B": (1363, 288),
+    "QUEBEC": (771, 260), "SIERRA": (1045, 260), "ROMEO": (1320, 260),
+    "N_1": (1022, 283), "N_2": (1068, 283),
     "AQ": (771, 158), "NQ": (771, 283),
     "AR": (1320, 158), "NR": (1320, 283),
     "AS": (1045, 158), "NS": (1045, 283),
@@ -54,7 +56,7 @@ nodes = {
     "A3": (1510, 158), "A4": (1180, 158), "A5": (886, 158), "A6": (560, 158), "A7": (315, 158),
     "S1": (1730, 158), "S2": (1670, 158), "S3": (1610, 158), "S4": (1450, 158), "S5": (1390, 158), "S6": (1250, 158),"S7": (1120, 158), 
     "S8": (965, 158), "S9": (829, 158), "S10": (710, 158), "S11": (499, 158), "S12": (438, 158), "S13": (377, 158), "S14": (265, 158), "S15": (174, 158),
-    "Stand_Stop_Bar": (1045, 227),
+    "Stand_Stop_Bar": (1045, 200),
     "TXY_B1": (1558, 158),"B1_HOLD": (1558, 120), "RWY27_B1": (1558, 70), "RWY27_B1_EXIT": (1558, 92),
     "TXY_C1": (645, 158),"C1_HOLD": (645, 120), "RWY09_C1": (645, 70), "RWY09_C1_EXIT": (645, 92),
     "TXY_D1": (214, 158),"D1_HOLD": (214, 120), "RWY09_D1": (214, 70),
@@ -118,13 +120,19 @@ edges = {
     "A7": ["S14", "S13"], "S12": ["S13", "S11"], "A6": ["S11", "TXY_C1"],
     "A5": ["S9", "S8"], "A4": ["S6", "S7"], "S4": ["S5", "A3"],
     "S2": ["S3", "S1"], "S1": ["A2_HOLD"],
-    "STAND19B": ["STAND19A","STAND19N"],
-    "NS": ["Stand_Stop_Bar","NQ","NR","STAND1N","STAND2N","STAND3N","STAND4N","STAND5N","STAND6N","STAND7N","STAND8N", "Stand_Stop_Bar"],   
-    "NQ": ["STAND1N","STAND2N","STAND3N","STAND4N","STAND8N_2","STAND20N","STAND19N"],
-    "STAND20N": ["STAND20B"],
-    "STAND20A": ["STAND20B"],
+    "NS": ["N_1","N_2","SIERRA"],   
+    "STAND5N":["N_2", "STAND6N"],
+    "STAND7N": ["STAND6N","STAND8N"],
+    "STAND18N": ["STAND8N"],
+    "SIERRA": ["Stand_Stop_Bar"],
+    "NQ": ["STAND8N_2","QUEBEC"],
+    "STAND1N": ["STAND1b","STAND9B","STAND8N_2","STAND2N"],
+    "STAND3N": ["STAND2N","STAND4N"],
+    "STAND4N": ["N_1"],
+    "QUEBEC": ["STAND19N"],
     "STAND8B": ["STAND8N_2","STAND8A"],
-    "NR": ["STAND5N","STAND6N","STAND7N","STAND8N","STAND18N","STAND22N","STAND21N"],
+    "NR": ["STAND18N","ROMEO"],
+    "STAND21N": ["ROMEO"],
     "AR": ["STAND21N","S6","S5"],
     "STAND1b": ["STAND1N","STAND1a"],
     "STAND2b": ["STAND2N","STAND2a"],
@@ -144,8 +152,7 @@ edges = {
     "STAND16B": ["STAND7N","STAND16A"],
     "STAND17B": ["STAND8N","STAND17A"],
     "STAND18B": ["STAND18N","STAND18A"],
-    "STAND21B": ["STAND21N","STAND21A"],
-    "STAND22B": ["STAND22N","STAND22A"],
+
   
     "10m9": ["9m9"],"9m9": ["8m9"],"8m9": ["7m9"],
     "7m9": ["6m9"],"6m9": ["5m9"],"5m9": ["4m9"],
@@ -165,7 +172,20 @@ for node, neighbors in list(edges.items()):
             edges[neighbor].append(node)
 
 def is_disabled_stand_node(node_name):
-    return node_name in DISABLED_STAND_NODES
+    # Check permanent disabled stands
+    if node_name in DISABLED_STAND_NODES:
+        return True
+    
+    # Check runway-specific disabled stands
+    runway_selector = globals().get('runway_var')
+    if runway_selector:
+        runway_in_use = runway_selector.get() if runway_selector else None
+        if runway_in_use == "09" and node_name in {"STAND18A", "STAND18B"}:
+            return True
+        if runway_in_use == "27" and node_name in {"STAND8A", "STAND8B"}:
+            return True
+    
+    return False
 
 def dijkstra_avoiding(start, goal, avoid_nodes=None):
     """Return shortest path avoiding specified nodes by filtering edges."""
@@ -701,9 +721,11 @@ LOW_VISIBILITY_VISUAL_ONLY_STOP_BAR_POSITIONS = {
     "A5": {"red": [(886, 148), (886, 153), (886, 158), (886, 163), (886, 168)]}, 
     "A6": {"red": [(560, 148), (560, 153), (560, 158), (560, 163), (560, 168)]}, 
     "A7": {"red": [(315, 148), (315, 153), (315, 158), (315, 163), (315, 168)]},
-    "Stand_Stop_Bar": {"red": [(1035, 227), (1040, 227), (1045, 227), (1050, 227), (1055, 227)]},
-    "STAND19N": {"red": [(761, 227), (766, 227), (771, 227), (776, 227), (781, 227)]},
-    "STAND21N": {"red": [(1310, 227), (1315, 227), (1320, 227), (1325, 227), (1330, 227)]},
+    "Stand_Stop_Bar": {"red": [(1035, 200), (1040, 200), (1045, 200), (1050, 200), (1055, 200)]},
+    "STAND19N": {"red": [(761, 200), (766, 200), (771, 200), (776, 200), (781, 200)]},
+    "STAND21N": {"red": [(1310, 200), (1315, 200), (1320, 200), (1325, 200), (1330, 200)]},
+    "N_1": {"red": [(1022, 273),(1022, 278),(1022, 283),(1022, 288),(1022, 293),]},
+    "N_2": {"red": [(1068, 273),(1068, 278),(1068, 283),(1068, 288),(1068, 293),]},
 }
 
 # Template: fill in red-light pixel coordinates for S-node stop bars.
@@ -726,6 +748,9 @@ S_NODE_STOP_BAR_TEMPLATE = {
     "S13": {"red": [(377, 148), (377, 153), (377, 158), (377, 163), (377, 168)]},
     "S14": {"red": [(265, 148), (265, 153), (265, 158), (265, 163), (265, 168)]},
     "S15": {"red": [(174, 148), (174, 153), (174, 158), (174, 163), (174, 168)]},
+    "SIERRA": {"red": [(1035, 260), (1040, 260), (1045, 260), (1050, 260), (1055, 260)]},
+    "QUEBEC": {"red": [(761, 260), (766, 260), (771, 260), (776, 260), (781, 260)]}, 
+    "ROMEO": {"red": [(1310, 260), (1315, 260), (1320, 260), (1325, 260), (1330, 260)]},
 }
 
 LOW_VISIBILITY_STOP_BAR_POSITIONS = {
@@ -755,15 +780,18 @@ LOW_VISIBILITY_SINGLE_AIRCRAFT_SECTIONS = {
     "A6",
     "A7",
     "E2_HOLD",
+    "N_1",
+    "N_2",
 }
 
 # Low-visibility taxi blocks: the upstream stop bar can only deluminate when
 # all nodes in the next block are clear.
-LOW_VISIBILITY_STOP_BAR_BLOCKS = {
+# Base low visibility blocks (used as template)
+LOW_VISIBILITY_STOP_BAR_BLOCKS_BASE = {
     # Blocks defined as the area between this stop bar and the next one ahead
     # in the outbound flow toward runway-holding points.
     "A3": {"TXY_B1", "S3", "S2", "S1","A2_HOLD"},
-    # Priority rule: when A4 and STAND21N are both waiting, STAND21N goes first.
+    # Priority rule: when A4 and STAND21N are both waiting, STAND21N goes first (Runway 27).
     # Keep STAND21N in A4's downstream block, but do not include A4 in STAND21N's block.
     "A4": {"S4", "S5", "AR", "S6","A3", "STAND21N"},
     "STAND21N": {"AR","S5","S4", "A3","S6"},
@@ -771,8 +799,69 @@ LOW_VISIBILITY_STOP_BAR_BLOCKS = {
     "A6": {"S11", "S12", "S13", "A7"},
     "A7": {"S14","TXY_D1", "S15","E2_HOLD"},
     "Stand_Stop_Bar": {"AS", "S7", "S8","A4","A5"},
-    "STAND19N": {"AQ", "S10","TXY_C1", "S9", "A6", "A5"},
+    # Priority rule: when STAND19N and A5 are both waiting, STAND19N goes first (Runway 09).
+    # Keep A5 in STAND19N's downstream block for Runway 27, but remove it for Runway 09.
+    "STAND19N": {"AQ", "S10","TXY_C1", "S9", "A6"},
+    "N_1": {"NS", "SIERRA", "Stand_Stop_Bar", "N_2"},
+    "N_2": {"STAND5N","STAND6N", "STAND7N","STAND8N","STAND18N","NR", "ROMEO", "STAND21N"},
+    
 }
+
+# Runway 27 specific low visibility blockss
+# Priority: STAND21N > A4; STAND19N does not interact with A5
+LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY27 = {
+    "A3": {"TXY_B1", "S3", "S2", "S1","A2_HOLD"},
+    "A4": {"S4", "S5", "AR", "S6","A3", "STAND21N"},
+    "STAND21N": {"AR","S5","S4", "A3","S6"},
+    "A5": {"AQ", "S9","S10", "TXY_C1"},
+    "A6": {"S11", "S12", "S13", "A7"},
+    "A7": {"S14","TXY_D1", "S15","E2_HOLD"},
+    "Stand_Stop_Bar": {"AS", "S7", "S8","A4","A5"},
+    "STAND19N": {"QUEBEC", "NQ", "STAND8N_2", "STAND1N", "STAND2N", "STAND3N", "STAND4N", "N_1"},
+    "N_1": {"NS", "SIERRA", "Stand_Stop_Bar", "N_2"},
+    "N_2": {"STAND5N","STAND6N", "STAND7N","STAND8N","STAND18N","NR", "ROMEO", "STAND21N"},
+}
+
+# Runway 09 specific low visibility blocks
+# Priority: STAND19N > A5; STAND21N does not interact with A4
+LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY09 = {
+    "A3": {"TXY_B1", "S3", "S2", "S1","A2_HOLD"},
+    "A4": {"S4", "S5", "AR", "S6","A3"},
+    "STAND21N": {"STAND5N","STAND6N", "STAND7N","STAND8N","STAND18N","NR", "ROMEO", "N_2"},
+    "A5": {"AQ", "S9","S10", "TXY_C1", "STAND19N"},
+    "A6": {"S11", "S12", "S13", "A7"},
+    "A7": {"S14","TXY_D1", "S15","E2_HOLD"},
+    "Stand_Stop_Bar": {"AS", "S7", "S8","A4","A5"},
+    "STAND19N": {"AQ", "S10","TXY_C1", "S9", "A6"},
+    "N_1": {"QUEBEC", "NQ", "STAND8N_2", "STAND1N", "STAND2N", "STAND3N", "STAND4N","STAND19N"},
+    "N_2": {"NS", "SIERRA", "Stand_Stop_Bar", "N_1"},
+}
+
+def get_low_visibility_stop_bar_blocks():
+    """Return runway-aware low visibility stop bar blocks.
+    
+    On Runway 27: STAND21N has priority over A4; STAND19N doesn't interact with A5
+    On Runway 09: STAND19N has priority over A5; STAND21N doesn't interact with A4
+    """
+    # Get current runway
+    runway_selector = globals().get('runway_var')
+    if not runway_selector:
+        return dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_BASE)
+    
+    try:
+        runway_in_use = runway_selector.get() if runway_selector else None
+    except:
+        return dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_BASE)
+    
+    if runway_in_use == "09":
+        return dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY09)
+    elif runway_in_use == "27":
+        return dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY27)
+    
+    return dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_BASE)
+
+# Legacy reference for backward compatibility
+LOW_VISIBILITY_STOP_BAR_BLOCKS = LOW_VISIBILITY_STOP_BAR_BLOCKS_BASE
 
 
 def get_active_stop_bar_positions():
@@ -844,7 +933,8 @@ def is_low_visibility_block_clear(stop_bar_node):
     if current_operations_mode != "Low Visibility Ops":
         return True
 
-    block_nodes = LOW_VISIBILITY_STOP_BAR_BLOCKS.get(stop_bar_node)
+    blocks = get_low_visibility_stop_bar_blocks()
+    block_nodes = blocks.get(stop_bar_node)
     if not block_nodes:
         return True
 
@@ -891,7 +981,8 @@ def is_low_visibility_section_entry_allowed(callsign, current_node, next_node):
         if is_low_visibility_section_occupied(next_node, exclude_callsign=callsign):
             return False
 
-    block_nodes = LOW_VISIBILITY_STOP_BAR_BLOCKS.get(current_node, set())
+    blocks = get_low_visibility_stop_bar_blocks()
+    block_nodes = blocks.get(current_node, set())
     for block_node in block_nodes:
         if is_low_visibility_section_occupied(block_node, exclude_callsign=callsign):
             return False
@@ -2261,6 +2352,17 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
             
             # Use the reserved target stand (set when aircraft spawned)
             target_stand = aircraft_info.get('target_stand')
+            # Check if target stand is still available (not disabled or occupied)
+            if target_stand and (is_disabled_stand_node(target_stand) or target_stand not in find_available_stands()):
+                # Target stand is no longer available, find a new one
+                available_stand = find_available_stand()
+                if available_stand:
+                    target_stand = available_stand
+                    aircraft_info['target_stand'] = available_stand
+                else:
+                    print(f"{aircraft_info['callsign']}: No available stands after landing")
+                    return
+            
             if target_stand:
                 # Taxi to the reserved stand, ignoring stop bars on exit
                 aircraft_info['ignore_stop_bars'] = True
@@ -2835,6 +2937,11 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
     when exiting the runway.
     """
     import math
+    
+    # Safety check: ensure destination stand is not disabled
+    if is_disabled_stand_node(destination_stand):
+        print(f"Warning: {aircraft_info.get('callsign')} cannot taxi to disabled stand {destination_stand}")
+        return
     
     # Get current node from aircraft info
     current_node = aircraft_info.get('node', '')
