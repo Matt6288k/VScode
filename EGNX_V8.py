@@ -807,7 +807,7 @@ LOW_VISIBILITY_STOP_BAR_BLOCKS_BASE = {
     
 }
 
-# Runway 27 specific low visibility blockss
+# Runway 27 specific low visibility blocks
 # Priority: STAND21N > A4; STAND19N does not interact with A5
 LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY27 = {
     "A3": {"TXY_B1", "S3", "S2", "S1","A2_HOLD"},
