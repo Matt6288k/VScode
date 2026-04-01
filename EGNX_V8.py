@@ -585,6 +585,8 @@ graph_visible = True  # Track whether graph is currently visible
 simulation_running = False
 activity_job_id = None
 schedule_turnaround_cb = None
+current_low_visibility_blocks = None  # Runway-specific low-vis blocks, set after play button
+current_low_visibility_runway = "27"  # Locked-in runway used for low-vis block selection
 
 # Minimum gate turnaround before an arrival can push back (at 1x simulation speed).
 MIN_TURNAROUND_DELAY_MS = 15 * 60 * 1000
@@ -730,8 +732,7 @@ LOW_VISIBILITY_VISUAL_ONLY_STOP_BAR_POSITIONS = {
 
 # Template: fill in red-light pixel coordinates for S-node stop bars.
 # When the "Stop bars" checkbox is enabled, any populated entries here are drawn.
-# Example format:
-# "S4": {"red": [(1450, 148), (1450, 153), (1450, 158), (1450, 163), (1450, 168)]}
+
 S_NODE_STOP_BAR_TEMPLATE = {
     "S1": {"red": [(1730, 148), (1730, 153), (1730, 158), (1730, 163), (1730, 168)]},
     "S2": {"red": [(1670, 148), (1670, 153), (1670, 158), (1670, 163), (1670, 168)]},
@@ -751,6 +752,52 @@ S_NODE_STOP_BAR_TEMPLATE = {
     "SIERRA": {"red": [(1035, 260), (1040, 260), (1045, 260), (1050, 260), (1055, 260)]},
     "QUEBEC": {"red": [(761, 260), (766, 260), (771, 260), (776, 260), (781, 260)]}, 
     "ROMEO": {"red": [(1310, 260), (1315, 260), (1320, 260), (1325, 260), (1330, 260)]},
+}
+
+S_NODE_STOP_BAR_BLOCKS_RWY27 = {
+    "S1": {"A2_HOLD"},
+    "S2": {"S1"},
+    "S3": {"S2"},
+    "A3": {"S3"},
+    "S4": {"A3"},
+    "S5": {"S4"},
+    "STAND21N": {"S5", "AR",},
+    "S6": {"STAND21N", "AR", "S5", "ROMEO"},
+    "A4": {"S6"},
+    "S7": {"A4"},
+    "Stand_Stop_Bar": {"AS", "S7", "S8"},
+    "S10": {"S9","AQ","STAND19N"},
+    "SIERRA": {"Stand_Stop_Bar"},
+    "STAND19N": {"QUEBEC"},
+    "QUEBEC": {"N_1","NQ", "STAND8N_2", "STAND1N", "STAND2N", "STAND3N", "STAND4N"},
+    "N_1": {"N_2","NS","SIERRA"},
+    "N_2": {"STAND5N","STAND6N", "STAND7N","STAND8N","STAND18N","NR","ROMEO"},
+    "ROMEO": {"STAND21N"},
+}
+
+S_NODE_STOP_BAR_BLOCKS_RWY09 = {
+    "A3": {"S4"},
+    "S4": {"S5"},
+    "S5": {"AR", "STAND21N","S6"},
+    "STAND21N": {"ROMEO"},
+    "ROMEO": {"NR", "STAND18N", "STAND8N", "STAND7N", "STAND6N", "STAND5N","N_2"},
+    "N_2": {"NS", "SIERRA", "N_1"},
+    "N_1": {"STAND4N", "STAND3N", "STAND2N", "STAND1N", "STAND8N_2", "QUEBEC","NQ"},
+    "QUEBEC": {"STAND19N"},
+    "STAND19N": {"AQ", "S10"},
+    "SIERRA": {"Stand_Stop_Bar"},
+    "Stand_Stop_Bar": {"AS", "S7", "S8"},
+    "S8": {"A5"},
+    "A5": {"S9"},
+    "S9": {"AQ", "S10", "STAND19N","QUEBEC"},
+    "S10": {"A6"},
+    "A6": {"S11"},
+    "S11": {"S12"},
+    "S12": {"S13"},
+    "S13": {"A7"},
+    "A7": {"S14"},
+    "S14": {"S15"},
+    "S15": {"E2_HOLD"},
 }
 
 LOW_VISIBILITY_STOP_BAR_POSITIONS = {
@@ -787,26 +834,6 @@ LOW_VISIBILITY_SINGLE_AIRCRAFT_SECTIONS = {
 # Low-visibility taxi blocks: the upstream stop bar can only deluminate when
 # all nodes in the next block are clear.
 # Base low visibility blocks (used as template)
-LOW_VISIBILITY_STOP_BAR_BLOCKS_BASE = {
-    # Blocks defined as the area between this stop bar and the next one ahead
-    # in the outbound flow toward runway-holding points.
-    "A3": {"TXY_B1", "S3", "S2", "S1","A2_HOLD"},
-    # Priority rule: when A4 and STAND21N are both waiting, STAND21N goes first (Runway 27).
-    # Keep STAND21N in A4's downstream block, but do not include A4 in STAND21N's block.
-    "A4": {"S4", "S5", "AR", "S6","A3", "STAND21N"},
-    "STAND21N": {"AR","S5","S4", "A3","S6"},
-    "A5": {"AQ", "S9","S10", "TXY_C1", "STAND19N",},
-    "A6": {"S11", "S12", "S13", "A7"},
-    "A7": {"S14","TXY_D1", "S15","E2_HOLD"},
-    "Stand_Stop_Bar": {"AS", "S7", "S8","A4","A5"},
-    # Priority rule: when STAND19N and A5 are both waiting, STAND19N goes first (Runway 09).
-    # Keep A5 in STAND19N's downstream block for Runway 27, but remove it for Runway 09.
-    "STAND19N": {"AQ", "S10","TXY_C1", "S9", "A6"},
-    "N_1": {"NS", "SIERRA", "Stand_Stop_Bar", "N_2"},
-    "N_2": {"STAND5N","STAND6N", "STAND7N","STAND8N","STAND18N","NR", "ROMEO", "STAND21N"},
-    
-}
-
 # Runway 27 specific low visibility blocks
 # Priority: STAND21N > A4; STAND19N does not interact with A5
 LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY27 = {
@@ -817,7 +844,7 @@ LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY27 = {
     "A6": {"S11", "S12", "S13", "A7"},
     "A7": {"S14","TXY_D1", "S15","E2_HOLD"},
     "Stand_Stop_Bar": {"AS", "S7", "S8","A4","A5"},
-    "STAND19N": {"QUEBEC", "NQ", "STAND8N_2", "STAND1N", "STAND2N", "STAND3N", "STAND4N", "N_1"},
+    "STAND19N": {"QUEBEC", "NQ", "STAND8N_2", "STAND1N", "STAND2N", "STAND3N", "STAND4N", "N_1","NS","STAND1b","STAND2b","STAND3b","STAND4b","STAND9B","STAND10B","STAND11B","STAND12B"},
     "N_1": {"NS", "SIERRA", "Stand_Stop_Bar", "N_2"},
     "N_2": {"STAND5N","STAND6N", "STAND7N","STAND8N","STAND18N","NR", "ROMEO", "STAND21N"},
 }
@@ -837,31 +864,61 @@ LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY09 = {
     "N_2": {"NS", "SIERRA", "Stand_Stop_Bar", "N_1"},
 }
 
-def get_low_visibility_stop_bar_blocks():
-    """Return runway-aware low visibility stop bar blocks.
+def initialize_low_visibility_blocks(runway_in_use=None):
+    """Initialize runway-specific low visibility blocks after play button is pressed.
     
+    Called from start_activity() to lock in the runway selection.
     On Runway 27: STAND21N has priority over A4; STAND19N doesn't interact with A5
     On Runway 09: STAND19N has priority over A5; STAND21N doesn't interact with A4
     """
-    # Get current runway
-    runway_selector = globals().get('runway_var')
-    if not runway_selector:
-        return dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_BASE)
-    
-    try:
+    global current_low_visibility_blocks, current_low_visibility_runway
+
+    # Resolve runway from UI selection if caller did not pass it explicitly.
+    if runway_in_use is None:
+        runway_selector = globals().get('runway_var')
         runway_in_use = runway_selector.get() if runway_selector else None
-    except:
-        return dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_BASE)
+
+    runway_in_use = str(runway_in_use).strip() if runway_in_use is not None else ""
     
     if runway_in_use == "09":
-        return dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY09)
+        current_low_visibility_blocks = dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY09)
+        current_low_visibility_runway = "09"
+        print("RWY 09")
     elif runway_in_use == "27":
-        return dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY27)
-    
-    return dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_BASE)
+        current_low_visibility_blocks = dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY27)
+        current_low_visibility_runway = "27"
+        print("RWY 27")
+    else:
+        # This should not happen if runway is always set before play button
+        current_low_visibility_blocks = dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY27)
+        current_low_visibility_runway = "27"
+        print("ELSE")
 
-# Legacy reference for backward compatibility
-LOW_VISIBILITY_STOP_BAR_BLOCKS = LOW_VISIBILITY_STOP_BAR_BLOCKS_BASE
+
+def get_template_stop_bar_blocks_for_runway():
+    runway_in_use = str(current_low_visibility_runway).strip()
+    if runway_in_use == "09":
+        return S_NODE_STOP_BAR_BLOCKS_RWY09
+    return S_NODE_STOP_BAR_BLOCKS_RWY27
+
+
+def get_low_visibility_stop_bar_blocks():
+    """Return the runway-locked low visibility stop bar blocks.
+    
+    Must be initialized by calling initialize_low_visibility_blocks() after the
+    play button is pressed. Returns the blocks for the currently selected runway.
+    """
+    # When template stop bars are enabled, always use only the runway-specific
+    # template block map and ignore LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY27/09.
+    if show_template_s_node_stop_bars:
+        template_blocks = get_template_stop_bar_blocks_for_runway()
+        return {stop_bar_node: set(block_nodes) for stop_bar_node, block_nodes in template_blocks.items()}
+
+    if current_low_visibility_blocks is None:
+        # Should not happen in normal operation; use Runway 27 as fallback
+        return dict(LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY27)
+
+    return dict(current_low_visibility_blocks)
 
 
 def get_active_stop_bar_positions():
@@ -872,10 +929,12 @@ def get_active_stop_bar_positions():
 
 
 def get_active_controlled_stop_bar_nodes():
-    return STOP_BAR_CONTROLLED_NODES_BY_MODE.get(
+    controlled_nodes = set(STOP_BAR_CONTROLLED_NODES_BY_MODE.get(
         current_operations_mode,
         set(NORMAL_STOP_BAR_POSITIONS.keys())
-    )
+    ))
+
+    return controlled_nodes
 
 
 def get_active_visual_only_stop_bar_nodes():
@@ -3929,6 +3988,8 @@ def build_home_screen():
         if simulation_running:
             return
         clear_existing_aircraft()
+        runway_in_use = runway_var.get()
+        initialize_low_visibility_blocks(runway_in_use)  # Lock in runway before starting
         simulation_running = True
         seed_initial_aircraft()
         schedule_next_activity()
