@@ -597,6 +597,8 @@ MIN_TURNAROUND_DELAY_MS = 15 * 60 * 1000
 MIN_PUSHBACK_GAP_SECONDS = 30
 MAX_PUSHBACK_GAP_SECONDS = 180
 next_pushback_release_time = 0.0
+manual_pushback_waiting = {}
+pushback_method_var = None
 
 # ==============================
 # SPEED CONTROL HELPER
@@ -3485,7 +3487,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
 # HOME SCREEN DISPLAY
 def build_home_screen():
     """Build the ATC home screen UI matching the provided PNG layout."""
-    global main_canvas, runtime_clock_var, sim_clock_var  # Make canvas and clocks accessible globally
+    global main_canvas, runtime_clock_var, sim_clock_var, pushback_method_var  # Make canvas, clocks, and pushback mode accessible globally
     
     # Clear any existing widgets
     for widget in app.winfo_children():
@@ -3509,6 +3511,89 @@ def build_home_screen():
         
         main_canvas = tk.Canvas(canvas_frame, width=new_width, height=new_height, highlightthickness=0)
         main_canvas.pack()
+
+        def find_clicked_stand_node(click_x, click_y, threshold=18):
+            nearest_stand = None
+            nearest_distance = None
+            for node_name, (sx, sy) in nodes.items():
+                if not (node_name.startswith("STAND") and node_name[-1] in {"A", "a"}):
+                    continue
+                dx = click_x - sx
+                dy = click_y - sy
+                dist_sq = dx * dx + dy * dy
+                if dist_sq <= threshold * threshold and (nearest_distance is None or dist_sq < nearest_distance):
+                    nearest_distance = dist_sq
+                    nearest_stand = node_name
+            return nearest_stand
+
+        def trigger_manual_pushback_for_aircraft(aircraft_info):
+            callsign = aircraft_info.get('callsign')
+            if not callsign or callsign not in active_aircraft:
+                return False
+            stand_node = aircraft_info.get('node')
+            if not stand_node or not (stand_node.startswith("STAND") and stand_node[-1] in {"A", "a"}):
+                return False
+            turnaround_job_id = aircraft_info.pop('turnaround_job_id', None)
+            if turnaround_job_id:
+                try:
+                    app.after_cancel(turnaround_job_id)
+                except Exception:
+                    pass
+            pushback_wait_job_id = aircraft_info.pop('pushback_wait_job_id', None)
+            if pushback_wait_job_id:
+                try:
+                    app.after_cancel(pushback_wait_job_id)
+                except Exception:
+                    pass
+            manual_pushback_waiting.pop(callsign, None)
+            start_departure_from_stand(aircraft_info, stand_node, manual_authorized=True)
+            return True
+
+        def on_canvas_click(event):
+            if pushback_method_var is None or pushback_method_var.get() != "manual":
+                return
+            if not main_canvas:
+                return
+
+            click_x, click_y = event.x, event.y
+            overlapping = main_canvas.find_overlapping(click_x - 20, click_y - 20, click_x + 20, click_y + 20)
+
+            # 1) Try direct click on aircraft triangle/label first.
+            for callsign, ac in list(active_aircraft.items()):
+                triangle_id = ac.get('triangle_id')
+                label_id = ac.get('label_id')
+                if (triangle_id and triangle_id in overlapping) or (label_id and label_id in overlapping):
+                    if trigger_manual_pushback_for_aircraft(ac):
+                        return
+
+            # 2) If direct hit misses, pick nearest parked stand aircraft within a click radius.
+            nearest_aircraft = None
+            nearest_dist_sq = None
+            nearest_radius = 45
+            for callsign, ac in list(active_aircraft.items()):
+                stand_node = ac.get('node')
+                if not stand_node or not (stand_node.startswith("STAND") and stand_node[-1] in {"A", "a"}):
+                    continue
+                pos = ac.get('position')
+                if not pos:
+                    continue
+                dx = click_x - pos[0]
+                dy = click_y - pos[1]
+                dist_sq = dx * dx + dy * dy
+                if dist_sq <= nearest_radius * nearest_radius and (nearest_dist_sq is None or dist_sq < nearest_dist_sq):
+                    nearest_dist_sq = dist_sq
+                    nearest_aircraft = ac
+            if nearest_aircraft and trigger_manual_pushback_for_aircraft(nearest_aircraft):
+                return
+
+            # 3) Final fallback: stand-click pushback.
+            clicked_stand = find_clicked_stand_node(click_x, click_y)
+            if not clicked_stand:
+                return
+            for callsign, ac in list(active_aircraft.items()):
+                if ac.get('node') == clicked_stand:
+                    trigger_manual_pushback_for_aircraft(ac)
+                    return
         
         # Draw the map image on the canvas
         top_photo = ImageTk.PhotoImage(top_img)
@@ -3523,6 +3608,9 @@ def build_home_screen():
         
         # Draw stop bars (always enabled)
         draw_stop_bars(main_canvas)
+
+        # Allow manual pushback control by clicking aircraft or occupied stand.
+        main_canvas.bind("<Button-1>", on_canvas_click)
         
     except Exception as e:
         print(f"Error loading map image: {e}")
@@ -3593,6 +3681,15 @@ def build_home_screen():
     
     # Toggle Graph Button
     ctk.CTkButton(lvp_frame, text="Toggle Nodes/Edges", command=toggle_graph_visibility).pack(anchor="w", pady=(10, 5))
+
+    # Pushback method selector
+    pushback_frame = ctk.CTkFrame(controls_main)
+    pushback_frame.pack(side="left", padx=20, pady=10)
+
+    ctk.CTkLabel(pushback_frame, text="Pushback method", font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 10))
+    pushback_method_var = tk.StringVar(value="automatic")
+    ctk.CTkRadioButton(pushback_frame, text="Manual", variable=pushback_method_var, value="manual").pack(anchor="w", pady=5)
+    ctk.CTkRadioButton(pushback_frame, text="Automatic", variable=pushback_method_var, value="automatic").pack(anchor="w", pady=5)
 
     # Center: Movements per hour / Delays in columnar format (matches status board style)
     data_frame = ctk.CTkFrame(controls_main)
@@ -3668,6 +3765,7 @@ def build_home_screen():
                 main_canvas.delete(ac_info['label_id'])
             remove_aircraft_from_status(callsign)
         active_aircraft.clear()
+        manual_pushback_waiting.clear()
         next_pushback_release_time = 0.0
 
     def generate_unique_callsign(prefix=None):
@@ -3708,7 +3806,7 @@ def build_home_screen():
             return random.randint(20, 90)
         return random.randint(30, 120)
 
-    def start_departure_from_stand(aircraft_info, stand_node):
+    def start_departure_from_stand(aircraft_info, stand_node, manual_authorized=False):
         """Convert a parked aircraft into a departure and start pushback."""
         if not main_canvas:
             return
@@ -3777,8 +3875,16 @@ def build_home_screen():
             if aircraft_info.get('node') != stand_node:
                 return
 
+            if pushback_method_var is not None and pushback_method_var.get() == "manual" and not manual_authorized:
+                aircraft_info['waiting_for_pushback_clearance'] = True
+                manual_pushback_waiting[callsign] = {
+                    'aircraft_info': aircraft_info,
+                    'stand_node': stand_node,
+                }
+                return
+
             now_sim = get_simulation_time()
-            if now_sim < next_pushback_release_time:
+            if not manual_authorized and now_sim < next_pushback_release_time:
                 aircraft_info['waiting_for_pushback_clearance'] = True
                 aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
                 return
@@ -3790,10 +3896,12 @@ def build_home_screen():
 
             aircraft_info['waiting_for_pushback_clearance'] = False
             aircraft_info.pop('pushback_wait_job_id', None)
+            manual_pushback_waiting.pop(callsign, None)
 
             # Once this pushback starts, reserve the next pushback release at a random
             # interval between 30 seconds and 3 minutes.
-            next_pushback_release_time = now_sim + random.randint(MIN_PUSHBACK_GAP_SECONDS, MAX_PUSHBACK_GAP_SECONDS)
+            if not manual_authorized:
+                next_pushback_release_time = now_sim + random.randint(MIN_PUSHBACK_GAP_SECONDS, MAX_PUSHBACK_GAP_SECONDS)
             pushback_aircraft(main_canvas, aircraft_info, stand_pushback_node, final_direction, runway_target=runway_target)
 
         aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
