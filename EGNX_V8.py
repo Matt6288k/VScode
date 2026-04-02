@@ -578,6 +578,8 @@ simulation_time_seconds = 0.0
 last_sim_real_time = time.perf_counter()
 main_canvas = None  # Global reference to the canvas
 show_template_s_node_stop_bars = False  # Toggle S-node template stop bars via checkbox
+runtime_clock_var = None  # Elapsed simulation runtime display
+sim_clock_var = None  # Simulated wall-clock display
 status_columns = {}  # Global reference to status board columns
 aircraft_labels = {}  # Track labels in each status column
 graph_element_ids = []  # Store all graph element IDs for hiding/showing
@@ -598,9 +600,25 @@ next_pushback_release_time = 0.0
 
 # ==============================
 # SPEED CONTROL HELPER
+SIMULATION_START_SECONDS = 9 * 60 * 60
+
 def adjust_delay(base_delay_ms):
     """Adjust a delay in milliseconds based on simulation speed multiplier."""
     return max(1, int(base_delay_ms / simulation_speed))
+
+def get_frame_timing_correction(base_delay_ms):
+    """Return a multiplier to compensate for tkinter after() minimum-delay flooring.
+
+    Example: base 30ms at 50x ideally runs every 0.6ms, but after() floors to 1ms.
+    This returns 1.666... so per-frame movement is increased accordingly.
+    """
+    if simulation_speed <= 0:
+        return 1.0
+    desired_delay_ms = base_delay_ms / simulation_speed
+    actual_delay_ms = adjust_delay(base_delay_ms)
+    if desired_delay_ms <= 0:
+        return 1.0
+    return actual_delay_ms / desired_delay_ms
 
 def get_simulation_time():
     """Return monotonically increasing simulation time in seconds.
@@ -610,10 +628,31 @@ def get_simulation_time():
     """
     global simulation_time_seconds, last_sim_real_time
     now = time.perf_counter()
+    if not simulation_running:
+        last_sim_real_time = now
+        return simulation_time_seconds
     elapsed_real = max(0.0, now - last_sim_real_time)
     simulation_time_seconds += elapsed_real * simulation_speed
     last_sim_real_time = now
     return simulation_time_seconds
+
+def format_clock_time(total_seconds, wrap_24h=False):
+    """Format a time value in seconds as HH:MM:SS."""
+    total_seconds = max(0, int(total_seconds))
+    if wrap_24h:
+        total_seconds %= 24 * 60 * 60
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+def update_simulation_clock_display(current_sim_time=None):
+    """Update runtime and simulated wall-clock labels."""
+    if runtime_clock_var is None or sim_clock_var is None:
+        return
+    if current_sim_time is None:
+        current_sim_time = get_simulation_time()
+    runtime_clock_var.set(format_clock_time(current_sim_time))
+    sim_clock_var.set(format_clock_time(SIMULATION_START_SECONDS + current_sim_time, wrap_24h=True))
 
 def set_simulation_speed(new_speed):
     """Update simulation speed while preserving continuous simulation time."""
@@ -1087,7 +1126,7 @@ def set_template_s_node_stop_bars_enabled(enabled):
     if main_canvas:
         update_stop_bars(main_canvas)
 
-def draw_stop_bars(canvas):
+def draw_stop_bars(canvas, current_time=None):
     """Draw stop bars for the currently selected operations mode.
     
     Red stop bar lights are always on, and turn off when a DEPARTING aircraft at that hold
@@ -1105,7 +1144,8 @@ def draw_stop_bars(canvas):
             canvas.delete(item_id)
     stop_bar_draw_ids.clear()
     
-    current_time = get_simulation_time()
+    if current_time is None:
+        current_time = get_simulation_time()
     
     # Check which hold points have DEPARTING aircraft that should turn off the stop bar
     # Landing aircraft (with ignore_stop_bars flag) should NOT affect stop bars
@@ -1165,18 +1205,20 @@ def draw_stop_bars(canvas):
         if items:
             stop_bar_draw_ids[hold_name] = items
 
-def update_stop_bars(canvas):
+def update_stop_bars(canvas, current_time=None):
     """Update stop bar lights based on runway status."""
     if not canvas:
         return
     
     # Redraw all stop bars with current runway status
-    draw_stop_bars(canvas)
+    draw_stop_bars(canvas, current_time)
 
 def continuous_stop_bar_update():
     """Continuously update stop bars every 100ms for smooth timer-based updates."""
+    current_time = get_simulation_time()
+    update_simulation_clock_display(current_time)
     if main_canvas:
-        update_stop_bars(main_canvas)
+        update_stop_bars(main_canvas, current_time)
     # Schedule next update
     app.after(adjust_delay(100), continuous_stop_bar_update)
 
@@ -2053,20 +2095,23 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
     # Enforce departure separation (1 or 2 minutes, scaled by sim speed)
     next_departure_release_time = get_simulation_time() + random.choice([60, 120])
 
-    # Takeoff parameters - 45 second takeoff with gradual acceleration from taxi speed
+    # Takeoff parameters as hard speeds (px per 30ms baseline frame)
     initial_speed = 0.22  # Starting speed - same as taxi speed (pixels per frame)
-    final_speed = 2.21   # Speed at rotation/liftoff (pixels per frame) - targets 45sec for ~1820px runways
+    final_speed = 2.21   # Speed at rotation/liftoff (pixels per frame)
     acceleration_distance = total_distance * 0.8  # Accelerate for 80% of runway
     max_turn_per_step = 8.0  # Same as taxi turning rate for consistency
-    
-    # Total steps to achieve ~45 second takeoff duration (1500 steps * 30ms = 45 seconds)
-    total_steps = 1500
+
+    # Use simulation-time deltas for movement so speed multipliers are exact.
+    base_frame_seconds = 0.03
+    aircraft_info['takeoff_distance'] = 0.0
+    aircraft_info['takeoff_last_sim_time'] = get_simulation_time()
     
     # Track if we've moved to airborne status
     moved_to_airborne = [False]
     
-    def animate_takeoff(step=0):
-        if step >= total_steps:
+    def animate_takeoff():
+        distance_traveled = aircraft_info.get('takeoff_distance', 0.0)
+        if distance_traveled >= total_distance:
             # Aircraft has left the screen - remove it from canvas
             canvas.delete(aircraft_info['triangle_id'])
             canvas.delete(aircraft_info['label_id'])
@@ -2081,8 +2126,11 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
             
             return
         
-        # Calculate progress (0.0 to 1.0)
-        progress = step / total_steps
+        # Calculate progress (0.0 to 1.0) from physical distance travelled.
+        if total_distance > 0:
+            progress = min(1.0, distance_traveled / total_distance)
+        else:
+            progress = 1.0
         
         # Move to Airborne status column at approximately 50% of takeoff roll
         if progress >= 0.5 and not moved_to_airborne[0]:
@@ -2093,20 +2141,23 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
                 update_stop_bars(main_canvas)
         
         # Calculate current speed with acceleration
-        if progress < (acceleration_distance / total_distance):
+        if total_distance > 0 and progress < (acceleration_distance / total_distance):
             # Accelerating phase
             accel_progress = progress / (acceleration_distance / total_distance)
             current_speed = initial_speed + (final_speed - initial_speed) * accel_progress
         else:
             # Constant speed phase
             current_speed = final_speed
-        
-        # Calculate cumulative distance traveled
-        if step == 0:
-            aircraft_info['takeoff_distance'] = 0.0
-        
-        aircraft_info['takeoff_distance'] += current_speed
-        distance_traveled = aircraft_info['takeoff_distance']
+
+        # Scale movement by elapsed simulation time since last update.
+        now_sim = get_simulation_time()
+        last_sim = aircraft_info.get('takeoff_last_sim_time', now_sim)
+        sim_dt = max(0.0, now_sim - last_sim)
+        aircraft_info['takeoff_last_sim_time'] = now_sim
+
+        move_dist = current_speed * (sim_dt / base_frame_seconds)
+        distance_traveled = min(total_distance, distance_traveled + move_dist)
+        aircraft_info['takeoff_distance'] = distance_traveled
         
         # Calculate current position along the path
         if total_distance > 0:
@@ -2160,8 +2211,7 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
         
         aircraft_info['position'] = (curr_x, curr_y)
         
-        # Schedule next step with shorter delay for faster animation
-        app.after(adjust_delay(30), animate_takeoff, step + 1)
+        app.after(adjust_delay(30), animate_takeoff)
     
     animate_takeoff()
 
@@ -2194,45 +2244,41 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
     aircraft_info.pop('segment_start_override', None)
     aircraft_info.pop('segment_start_override_idx', None)
     aircraft_info['deceleration_start'] = deceleration_start
-    
-    landing_frame_seconds = 0.03  # Matches app.after(adjust_delay(30), ...)
-    target_runway_landing_seconds = 50.0
 
-    def _base_landing_speed_for_distance(distance_traveled, total_distance):
-        """Base cubic landing speed profile in px/frame (before calibration scaling)."""
-        if total_distance <= 0:
-            return 0.22
-        if distance_traveled < total_distance * 0.25:
-            return 1.6
-        adjusted_distance = distance_traveled - (total_distance * 0.25)
-        adjusted_total = total_distance * 0.75
-        decel_progress = min(1.0, adjusted_distance / max(adjusted_total * 0.9, 1))
-        ease = decel_progress * decel_progress * decel_progress
-        return 1.6 - (1.38 * ease)
+    # Hard-coded landing speed profile by runway progress. These values are per update,
+    # and the speed multiplier is still handled by the existing af#ter() delay scaling.
+    landing_speed_profiles = {
+        1.0: [(0.00, 0.95), (0.75, 0.95), (0.82, 0.80), (0.90, 0.62), (0.96, 0.42), (1.00, 0.28)],
+        10.0: [(0.00, 0.95), (0.75, 0.95), (0.82, 0.80), (0.90, 0.62), (0.96, 0.42), (1.00, 0.28)],
+        50.0: [(0.00, 0.95), (0.75, 0.95), (0.82, 0.80), (0.90, 0.62), (0.96, 0.42), (1.00, 0.28)],
+    }
 
-    def _estimate_runway_landing_duration_seconds(total_distance):
-        """Numerically estimate 1x runway-landing duration using the cubic profile."""
-        if total_distance <= 0:
-            return 0.0
-        simulated_distance = 0.0
-        frame_count = 0
-        max_frames = 200000
-        while simulated_distance < total_distance and frame_count < max_frames:
-            simulated_distance += max(0.01, _base_landing_speed_for_distance(simulated_distance, total_distance))
-            frame_count += 1
-        return frame_count * landing_frame_seconds
+    def get_landing_roll_speed(progress):
+        """Return a hard-coded landing speed for the current runway progress."""
+        profile = landing_speed_profiles.get(simulation_speed, landing_speed_profiles[1.0])
+        progress = max(0.0, min(1.0, progress))
+        if progress <= profile[0][0]:
+            return profile[0][1]
+        for index in range(1, len(profile)):
+            p0, s0 = profile[index - 1]
+            p1, s1 = profile[index]
+            if progress <= p1:
+                if p1 <= p0:
+                    return s1
+                blend = (progress - p0) / (p1 - p0)
+                return s0 + (s1 - s0) * blend
+        return profile[-1][1]
 
-    # Pre-calculate total deceleration distance for smooth global speed control
+    # Pre-calculate total distance from airborne spawn to the configured runway
+    # exit node (e.g. RWY09_AirBorne -> RWY09_C1).
     try:
-        # Decelerate from spawn (index 0) to the runway exit node
         deceleration_start_idx = 0
         runway_exit_idx = route.index(runway_exit_node)
         
-        # Calculate total distance from deceleration start to runway exit
         decel_total_distance = 0
-        for i in range(deceleration_start_idx, runway_exit_idx + 1):
+        for i in range(deceleration_start_idx, runway_exit_idx):
             node_a = route[i]
-            node_b = route[i + 1] if i + 1 < len(route) else route[i]
+            node_b = route[i + 1]
             decel_total_distance += math.hypot(nodes[node_b][0] - nodes[node_a][0], 
                                                nodes[node_b][1] - nodes[node_a][1])
         
@@ -2240,18 +2286,11 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
         aircraft_info['decel_distance_traveled'] = 0.0
         aircraft_info['deceleration_start_idx'] = deceleration_start_idx
         aircraft_info['runway_exit_idx'] = runway_exit_idx
-
-        base_duration_s = _estimate_runway_landing_duration_seconds(decel_total_distance)
-        if base_duration_s > 0:
-            aircraft_info['landing_speed_scale'] = max(0.05, min(5.0, base_duration_s / target_runway_landing_seconds))
-        else:
-            aircraft_info['landing_speed_scale'] = 1.0
     except (ValueError, KeyError):
         aircraft_info['decel_total_distance'] = 1000
         aircraft_info['decel_distance_traveled'] = 0.0
         aircraft_info['deceleration_start_idx'] = 0
         aircraft_info['runway_exit_idx'] = len(route) - 1
-        aircraft_info['landing_speed_scale'] = 1.0
     
     # Track status changes
     moved_to_taxiing = [False]
@@ -2317,6 +2356,8 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
             x1, y1 = segment_points[idx + 1]
             return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
 
+        aircraft_info['landing_last_sim_time'] = get_simulation_time()
+
         def animate_segment(cursor=0.0):
             if cursor >= max(steps - 1, 0):
                 aircraft_info['route_index'] = route_idx + 1
@@ -2357,7 +2398,8 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 ry = px * sin_a + py * cos_a
                 rotated_points.extend([curr_x + rx, curr_y + ry])
 
-            if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
+            # Avoid taxi conflict hold while still on runway rollout.
+            if route_idx > runway_exit_idx and not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
                 app.after(adjust_delay(200), animate_segment, cursor)
                 return
 
@@ -2375,23 +2417,25 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 decel_distance_traveled += math.hypot(curr_x - prev_x, curr_y - prev_y)
                 aircraft_info['decel_distance_traveled'] = decel_distance_traveled
 
-            # Keep cubic landing deceleration before runway exit, then taxi speed.
+            # Keep landing movement on the hard-coded progress table until runway exit.
             if route_idx <= runway_exit_idx:
                 decel_total_distance = aircraft_info.get('decel_total_distance', 1000)
                 decel_distance_traveled = aircraft_info.get('decel_distance_traveled', 0.0)
-                if decel_distance_traveled < decel_total_distance * 0.25:
-                    current_speed = 1.6
+                if decel_total_distance > 0:
+                    runway_progress = min(1.0, decel_distance_traveled / decel_total_distance)
                 else:
-                    adjusted_distance = decel_distance_traveled - (decel_total_distance * 0.25)
-                    adjusted_total = decel_total_distance * 0.75
-                    decel_progress = min(1.0, adjusted_distance / max(adjusted_total * 0.9, 1))
-                    ease = decel_progress * decel_progress * decel_progress
-                    current_speed = 1.6 - (1.38 * ease)
-                current_speed *= aircraft_info.get('landing_speed_scale', 1.0)
+                    runway_progress = 1.0
+                current_speed = get_landing_roll_speed(runway_progress)
             else:
-                current_speed = 0.22
+                current_speed = get_current_taxi_speed()
 
-            cursor_step = max(0.05, current_speed / max(point_spacing, 0.01))
+            now_sim = get_simulation_time()
+            last_sim = aircraft_info.get('landing_last_sim_time', now_sim)
+            sim_dt = max(0.0, now_sim - last_sim)
+            aircraft_info['landing_last_sim_time'] = now_sim
+
+            dt_factor = sim_dt / 0.03
+            cursor_step = max(0.05, current_speed / max(point_spacing, 0.01)) * dt_factor
             app.after(adjust_delay(30), animate_segment, cursor + cursor_step)
 
         animate_segment(0.0)
@@ -2515,6 +2559,7 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 aircraft_info['segment_x'] = start_x
                 aircraft_info['segment_y'] = start_y
                 aircraft_info['segment_remaining_distance'] = distance
+                aircraft_info['landing_last_sim_time'] = get_simulation_time()
             
             # Check if we've reached the destination node (distance-based)
             current_x = aircraft_info.get('segment_x', start_x)
@@ -2533,41 +2578,26 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 move_through_route()
                 return
             
-            # Calculate progress through this segment
-            progress = step / steps
-            
             # Move to Taxiing status once aircraft has passed the runway exit node
             runway_exit_idx = aircraft_info.get('runway_exit_idx', len(route) - 1)
             if route_idx > runway_exit_idx and not moved_to_taxiing[0]:
                 move_aircraft_status(aircraft_info['callsign'], 'Taxiing')
                 moved_to_taxiing[0] = True
             
-            # Calculate current speed with smooth cubic deceleration calibrated to ~50s runway landing at 1x
+            # Calculate current speed with hard-coded progress-based landing profile.
             if is_decelerating:
-                # Use pre-calculated total deceleration distance
                 decel_total_distance = aircraft_info.get('decel_total_distance', 1000)
                 decel_distance_traveled = aircraft_info.get('decel_distance_traveled', 0.0)
-                
-                # Maintain constant speed for first 25% of runway, then decelerate
-                if decel_distance_traveled < decel_total_distance * 0.25:
-                    # Constant landing speed for first 25%
-                    current_speed = 1.6
-                else:
-                    # Calculate deceleration progress starting after 25% point
-                    adjusted_distance = decel_distance_traveled - (decel_total_distance * 0.25)
-                    adjusted_total = decel_total_distance * 0.75  # Remaining distance for deceleration
-                    
-                    # Complete deceleration at 90% of remaining distance
-                    decel_progress = min(1.0, adjusted_distance / max(adjusted_total * 0.9, 1))
-                    
-                    # Cubic easing for smooth deceleration: 1.6 → 0.22 px/frame
-                    ease = decel_progress * decel_progress * decel_progress
-                    current_speed = 1.6 - (1.38 * ease)
 
-                current_speed *= aircraft_info.get('landing_speed_scale', 1.0)
+                if decel_total_distance > 0:
+                    runway_progress = min(1.0, decel_distance_traveled / decel_total_distance)
+                else:
+                    runway_progress = 1.0
+
+                current_speed = get_landing_roll_speed(runway_progress)
             else:
                 # Constant taxi speed after runway exit
-                current_speed = 0.22
+                current_speed = get_current_taxi_speed()
             
             # Move along segment by actual distance this frame
             if distance > 0:
@@ -2576,8 +2606,14 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
             else:
                 ux, uy = 0.0, 0.0
             
+            now_sim = get_simulation_time()
+            last_sim = aircraft_info.get('landing_last_sim_time', now_sim)
+            sim_dt = max(0.0, now_sim - last_sim)
+            aircraft_info['landing_last_sim_time'] = now_sim
+
+            dt_factor = sim_dt / 0.03
             remaining = aircraft_info.get('segment_remaining_distance', distance)
-            move_dist = min(current_speed, remaining)
+            move_dist = min(current_speed * dt_factor, remaining)
             step_x = ux * move_dist
             step_y = uy * move_dist
             
@@ -2716,7 +2752,10 @@ def landing_aircraft(canvas, aircraft_info, runway_exit_node):
                 ry = px * sin_a + py * cos_a
                 rotated_points.extend([curr_x + rx, curr_y + ry])
 
-            if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
+            # Do not apply generic taxi conflict holds during runway landing rollout.
+            # Runway occupancy is already protected at spawn logic; this avoids the
+            # 200ms retry loop making landing look unnaturally slow from AirBorne.
+            if not is_decelerating and not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
                 app.after(adjust_delay(200), animate_segment, step)
                 return
 
@@ -3446,7 +3485,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
 # HOME SCREEN DISPLAY
 def build_home_screen():
     """Build the ATC home screen UI matching the provided PNG layout."""
-    global main_canvas  # Make canvas accessible globally
+    global main_canvas, runtime_clock_var, sim_clock_var  # Make canvas and clocks accessible globally
     
     # Clear any existing widgets
     for widget in app.winfo_children():
@@ -3564,12 +3603,16 @@ def build_home_screen():
     delays_var = tk.StringVar(value="15")
     avg_taxi_time_var = tk.StringVar(value="15min")
     runway_util_var = tk.StringVar(value="80secs")
+    runtime_clock_var = tk.StringVar(value="00:00:00")
+    sim_clock_var = tk.StringVar(value="09:00:00")
 
     metrics = [
         ("Movements Per Hour", movements_per_hour_var),
         ("Delays", delays_var),
         ("Average Taxi Time", avg_taxi_time_var),
         ("Runway Utilisation", runway_util_var),
+        ("Runtime Clock", runtime_clock_var),
+        ("Sim Clock", sim_clock_var),
     ]
 
     for title, var in metrics:
@@ -3984,13 +4027,18 @@ def build_home_screen():
         activity_job_id = app.after(adjust_delay(delay_ms), schedule_next_activity)
 
     def start_activity():
-        global simulation_running, activity_job_id
+        global simulation_running, activity_job_id, simulation_time_seconds, last_sim_real_time, next_departure_release_time, next_pushback_release_time
         if simulation_running:
             return
         clear_existing_aircraft()
         runway_in_use = runway_var.get()
         initialize_low_visibility_blocks(runway_in_use)  # Lock in runway before starting
+        simulation_time_seconds = 0.0
+        last_sim_real_time = time.perf_counter()
+        next_departure_release_time = 0.0
+        next_pushback_release_time = 0.0
         simulation_running = True
+        update_simulation_clock_display(0.0)
         seed_initial_aircraft()
         schedule_next_activity()
     
