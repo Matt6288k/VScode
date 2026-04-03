@@ -3,6 +3,8 @@ import warnings
 import math
 import heapq
 import time
+import ctypes
+import sys
 from tkinter import ttk
 import tkinter as tk
 import os
@@ -571,7 +573,7 @@ stop_bar_off_until = {}  # Track when each stop bar should turn back on (time-ba
 next_departure_release_time = 0.0  # Track when the next departure may be released (time-based)
 runway_protected = True  # Track if runway is protected (stop bars on)
 current_operations_mode = "Normal Ops"
-NORMAL_OPS_TAXI_SPEED = 0.24
+NORMAL_OPS_TAXI_SPEED = 3.6
 LOW_VIS_TAXI_SPEED = 0.05
 simulation_speed = 1.0  # Speed multiplier for simulation (1x, 10x)
 simulation_time_seconds = 0.0
@@ -589,6 +591,7 @@ activity_job_id = None
 schedule_turnaround_cb = None
 current_low_visibility_blocks = None  # Runway-specific low-vis blocks, set after play button
 current_low_visibility_runway = "27"  # Locked-in runway used for low-vis block selection
+windows_timer_period_active = False
 
 # Minimum gate turnaround before an arrival can push back (at 1x simulation speed).
 MIN_TURNAROUND_DELAY_MS = 15 * 60 * 1000
@@ -607,6 +610,31 @@ SIMULATION_START_SECONDS = 9 * 60 * 60
 def adjust_delay(base_delay_ms):
     """Adjust a delay in milliseconds based on simulation speed multiplier."""
     return max(1, int(base_delay_ms / simulation_speed))
+
+
+def configure_windows_timer_resolution():
+    """Request 1ms timer resolution on Windows to stabilize tkinter after() timing."""
+    global windows_timer_period_active
+    if sys.platform != "win32" or windows_timer_period_active:
+        return
+    try:
+        result = ctypes.windll.winmm.timeBeginPeriod(1)
+        if result == 0:
+            windows_timer_period_active = True
+    except Exception:
+        windows_timer_period_active = False
+
+
+def restore_windows_timer_resolution():
+    """Release the Windows timer resolution request if it was enabled."""
+    global windows_timer_period_active
+    if sys.platform != "win32" or not windows_timer_period_active:
+        return
+    try:
+        ctypes.windll.winmm.timeEndPeriod(1)
+    except Exception:
+        pass
+    windows_timer_period_active = False
 
 def get_frame_timing_correction(base_delay_ms):
     """Return a multiplier to compensate for tkinter after() minimum-delay flooring.
@@ -1093,6 +1121,8 @@ def is_low_visibility_section_entry_allowed(callsign, current_node, next_node):
 def get_current_taxi_speed():
     if current_operations_mode == "Low Visibility Ops":
         return LOW_VIS_TAXI_SPEED
+    # Keep taxi speed independent of simulation speed.
+    # Simulation acceleration is already handled by sim-time progression and adjusted delays.
     return NORMAL_OPS_TAXI_SPEED
 
 
@@ -1856,6 +1886,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
             # For non-runway segments, use original segment_points approach
             steps = len(segment_points)
             lookahead_points = 4
+            point_spacing = max(speed, 0.01)
 
             if 'heading' not in aircraft_info:
                 if steps > 1:
@@ -1864,9 +1895,22 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
                     aircraft_info['heading'] = math.degrees(math.atan2(y1 - y0, x1 - x0))
                 else:
                     aircraft_info['heading'] = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
-            
-            def animate_segment(step=0):
-                if step >= steps:
+
+            def _point_at_cursor(cursor):
+                if steps <= 1:
+                    return segment_points[0]
+                idx = int(cursor)
+                if idx >= steps - 1:
+                    return segment_points[-1]
+                t = cursor - idx
+                x0, y0 = segment_points[idx]
+                x1, y1 = segment_points[idx + 1]
+                return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+
+            aircraft_info['taxi_last_sim_time'] = get_simulation_time()
+
+            def animate_segment(cursor=0.0):
+                if cursor >= max(steps - 1, 0):
                     # Reached next node, move to the next segment immediately without delay
                     aircraft_info['route_index'] = route_idx + 1
                     aircraft_info['node'] = next_node
@@ -1874,12 +1918,12 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
                     # Continue immediately to next segment for smooth transition
                     move_to_next_node()
                     return
-                
-                curr_x, curr_y = segment_points[step]
+
+                curr_x, curr_y = _point_at_cursor(cursor)
 
                 if steps > 1:
-                    look_idx = min(step + lookahead_points, steps - 1)
-                    look_x, look_y = segment_points[look_idx]
+                    look_cursor = min(cursor + lookahead_points, max(steps - 1, 0))
+                    look_x, look_y = _point_at_cursor(look_cursor)
                     turn_target = math.degrees(math.atan2(look_y - curr_y, look_x - curr_x))
                 else:
                     turn_target = aircraft_info['heading']
@@ -1916,7 +1960,8 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
                     rotated_points.extend([curr_x + rx, curr_y + ry])
 
                 if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
-                    app.after(adjust_delay(200), animate_segment, step)
+                    aircraft_info['taxi_last_sim_time'] = get_simulation_time()
+                    app.after(adjust_delay(200), animate_segment, cursor)
                     return
                 
                 canvas.coords(aircraft_info['triangle_id'], *rotated_points)
@@ -1926,9 +1971,16 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
                 history.append((curr_x, curr_y))
                 if len(history) > 400:
                     del history[:-300]
-                
+
+                now_sim = get_simulation_time()
+                last_sim = aircraft_info.get('taxi_last_sim_time', now_sim)
+                sim_dt = max(0.0, now_sim - last_sim)
+                aircraft_info['taxi_last_sim_time'] = now_sim
+
+                cursor_step = max(0.05, (speed * sim_dt) / point_spacing)
+
                 # Schedule next step
-                app.after(adjust_delay(50), animate_segment, step + 1)
+                app.after(adjust_delay(50), animate_segment, cursor + cursor_step)
         
         animate_segment()
     
@@ -3393,6 +3445,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
             # For non-runway segments, use original segment_points approach
             steps = len(segment_points)
             lookahead_points = 4
+            point_spacing = max(get_current_taxi_speed(), 0.01)
 
             if 'heading' not in aircraft_info:
                 if steps > 1:
@@ -3401,21 +3454,34 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
                     aircraft_info['heading'] = math.degrees(math.atan2(y1 - y0, x1 - x0))
                 else:
                     aircraft_info['heading'] = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
-            
-            def animate_segment(step=0):
-                if step >= steps:
+
+            def _point_at_cursor(cursor):
+                if steps <= 1:
+                    return segment_points[0]
+                idx = int(cursor)
+                if idx >= steps - 1:
+                    return segment_points[-1]
+                t = cursor - idx
+                x0, y0 = segment_points[idx]
+                x1, y1 = segment_points[idx + 1]
+                return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
+
+            aircraft_info['arrival_taxi_last_sim_time'] = get_simulation_time()
+
+            def animate_segment(cursor=0.0):
+                if cursor >= max(steps - 1, 0):
                     # Reached next node, move to the next segment
                     aircraft_info['route_index'] = route_idx + 1
                     aircraft_info['node'] = next_node
                     aircraft_info['position'] = segment_points[-1]
                     move_to_next_node()
                     return
-                
-                curr_x, curr_y = segment_points[step]
+
+                curr_x, curr_y = _point_at_cursor(cursor)
 
                 if steps > 1:
-                    look_idx = min(step + lookahead_points, steps - 1)
-                    look_x, look_y = segment_points[look_idx]
+                    look_cursor = min(cursor + lookahead_points, max(steps - 1, 0))
+                    look_x, look_y = _point_at_cursor(look_cursor)
                     turn_target = math.degrees(math.atan2(look_y - curr_y, look_x - curr_x))
                 else:
                     turn_target = aircraft_info['heading']
@@ -3465,7 +3531,8 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
                     rotated_points.extend([curr_x + rx, curr_y + ry])
 
                 if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
-                    app.after(adjust_delay(200), animate_segment, step)
+                    aircraft_info['arrival_taxi_last_sim_time'] = get_simulation_time()
+                    app.after(adjust_delay(200), animate_segment, cursor)
                     return
 
                 canvas.coords(aircraft_info['triangle_id'], *rotated_points)
@@ -3475,9 +3542,16 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
                 history.append((curr_x, curr_y))
                 if len(history) > 400:
                     del history[:-300]
-                
+
+                now_sim = get_simulation_time()
+                last_sim = aircraft_info.get('arrival_taxi_last_sim_time', now_sim)
+                sim_dt = max(0.0, now_sim - last_sim)
+                aircraft_info['arrival_taxi_last_sim_time'] = now_sim
+
+                cursor_step = max(0.05, (get_current_taxi_speed() * sim_dt) / point_spacing)
+
                 # Schedule next step
-                app.after(adjust_delay(50), animate_segment, step + 1)
+                app.after(adjust_delay(50), animate_segment, cursor + cursor_step)
         
         animate_segment()
     
@@ -4226,13 +4300,23 @@ if __name__ == "__main__":
     if not HAS_CTK:
         print("customtkinter is not installed. To run the GUI locally, install customtkinter and run this file directly.")
     else:
+        configure_windows_timer_resolution()
         app = ctk.CTk()
         app.title("Airport Control Panel")
         app.geometry(f"{screen_width}x{screen_height}+100+100")
         app.minsize(800, 600)
         app.state("zoomed")
+
+        def on_app_close():
+            restore_windows_timer_resolution()
+            app.destroy()
+
+        app.protocol("WM_DELETE_WINDOW", on_app_close)
         # Build the home screen and start the GUI
         build_home_screen()
         # Start continuous stop bar updates
         continuous_stop_bar_update()
-        app.mainloop()
+        try:
+            app.mainloop()
+        finally:
+            restore_windows_timer_resolution()
