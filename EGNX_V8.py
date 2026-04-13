@@ -8,6 +8,8 @@ import sys
 from tkinter import ttk
 import tkinter as tk
 import os
+import csv
+from datetime import datetime
 
 # Screen defaults (used for image sizing and any layout calculations)
 screen_width = 1920
@@ -574,7 +576,7 @@ next_departure_release_time = 0.0  # Track when the next departure may be releas
 runway_protected = True  # Track if runway is protected (stop bars on)
 current_operations_mode = "Normal Ops"
 NORMAL_OPS_TAXI_SPEED = 3.6
-LOW_VIS_TAXI_SPEED = 0.05
+LOW_VIS_TAXI_SPEED = 0.6
 simulation_speed = 1.0  # Speed multiplier for simulation (1x, 10x)
 simulation_time_seconds = 0.0
 last_sim_real_time = time.perf_counter()
@@ -592,6 +594,25 @@ schedule_turnaround_cb = None
 current_low_visibility_blocks = None  # Runway-specific low-vis blocks, set after play button
 current_low_visibility_runway = "27"  # Locked-in runway used for low-vis block selection
 windows_timer_period_active = False
+runway_var = None
+
+def build_movement_log_csv_path():
+    """Create a timestamped movement log filename, e.g. Movement_log_13_1041.csv."""
+    timestamp = datetime.now().strftime("%d_%H%M")
+    base_name = f"Movement_log_{timestamp}"
+    candidate = os.path.join(script_dir, f"{base_name}.csv")
+    if not os.path.exists(candidate):
+        return candidate
+
+    suffix = 1
+    while True:
+        candidate = os.path.join(script_dir, f"{base_name}_{suffix}.csv")
+        if not os.path.exists(candidate):
+            return candidate
+        suffix += 1
+
+
+MOVEMENTS_LOG_CSV_PATH = build_movement_log_csv_path()
 
 # Minimum gate turnaround before an arrival can push back (at 1x simulation speed).
 MIN_TURNAROUND_DELAY_MS = 15 * 60 * 1000
@@ -683,6 +704,48 @@ def update_simulation_clock_display(current_sim_time=None):
         current_sim_time = get_simulation_time()
     runtime_clock_var.set(format_clock_time(current_sim_time))
     sim_clock_var.set(format_clock_time(SIMULATION_START_SECONDS + current_sim_time, wrap_24h=True))
+
+
+def get_logging_operations_mode():
+    return "low visibility" if current_operations_mode == "Low Visibility Ops" else "normal"
+
+
+def get_logging_runway_in_use():
+    runway_selector = globals().get('runway_var')
+    if runway_selector is not None:
+        try:
+            return runway_selector.get()
+        except Exception:
+            pass
+    return current_low_visibility_runway
+
+
+def get_logging_lvp_stop_bars_enabled():
+    return "yes" if show_template_s_node_stop_bars else "no"
+
+
+def append_movement_log(callsign, movement_type):
+    """Append a takeoff/landing movement row to the CSV movement log."""
+    sim_clock = format_clock_time(SIMULATION_START_SECONDS + get_simulation_time(), wrap_24h=True)
+    row = {
+        "callsign": callsign,
+        "movement_type": movement_type,
+        "event_time": sim_clock,
+        "operations_mode": get_logging_operations_mode(),
+        "runway_in_use": get_logging_runway_in_use(),
+        "lvp_improvement_stop_bars": get_logging_lvp_stop_bars_enabled(),
+    }
+    header = list(row.keys())
+
+    try:
+        needs_header = (not os.path.exists(MOVEMENTS_LOG_CSV_PATH)) or os.path.getsize(MOVEMENTS_LOG_CSV_PATH) == 0
+        with open(MOVEMENTS_LOG_CSV_PATH, "a", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=header)
+            if needs_header:
+                writer.writeheader()
+            writer.writerow(row)
+    except Exception as exc:
+        print(f"Movement logging failed for {callsign}: {exc}")
 
 def set_simulation_speed(new_speed):
     """Update simulation speed while preserving continuous simulation time."""
@@ -2166,6 +2229,7 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
     def animate_takeoff():
         distance_traveled = aircraft_info.get('takeoff_distance', 0.0)
         if distance_traveled >= total_distance:
+            append_movement_log(aircraft_info['callsign'], "takeoff")
             # Aircraft has left the screen - remove it from canvas
             canvas.delete(aircraft_info['triangle_id'])
             canvas.delete(aircraft_info['label_id'])
@@ -3561,7 +3625,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
 # HOME SCREEN DISPLAY
 def build_home_screen():
     """Build the ATC home screen UI matching the provided PNG layout."""
-    global main_canvas, runtime_clock_var, sim_clock_var, pushback_method_var  # Make canvas, clocks, and pushback mode accessible globally
+    global main_canvas, runtime_clock_var, sim_clock_var, pushback_method_var, runway_var  # Make canvas, clocks, and pushback mode accessible globally
     
     # Clear any existing widgets
     for widget in app.winfo_children():
@@ -4152,6 +4216,7 @@ def build_home_screen():
                         'target_stand': available_stand
                     }
                     active_aircraft[callsign] = aircraft_info
+                    append_movement_log(callsign, "landing")
                     # Move to Runway status immediately to prevent departures
                     move_aircraft_status(callsign, 'Runway')
                     app.after(adjust_delay(500), lambda: landing_aircraft(main_canvas, aircraft_info, runway_exit))
