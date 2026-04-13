@@ -3,13 +3,9 @@ import warnings
 import math
 import heapq
 import time
-import ctypes
-import sys
 from tkinter import ttk
 import tkinter as tk
 import os
-import csv
-from datetime import datetime
 
 # Screen defaults (used for image sizing and any layout calculations)
 screen_width = 1920
@@ -575,8 +571,8 @@ stop_bar_off_until = {}  # Track when each stop bar should turn back on (time-ba
 next_departure_release_time = 0.0  # Track when the next departure may be released (time-based)
 runway_protected = True  # Track if runway is protected (stop bars on)
 current_operations_mode = "Normal Ops"
-NORMAL_OPS_TAXI_SPEED = 3.6
-LOW_VIS_TAXI_SPEED = 0.6
+NORMAL_OPS_TAXI_SPEED = 0.24
+LOW_VIS_TAXI_SPEED = 0.05
 simulation_speed = 1.0  # Speed multiplier for simulation (1x, 10x)
 simulation_time_seconds = 0.0
 last_sim_real_time = time.perf_counter()
@@ -593,30 +589,6 @@ activity_job_id = None
 schedule_turnaround_cb = None
 current_low_visibility_blocks = None  # Runway-specific low-vis blocks, set after play button
 current_low_visibility_runway = "27"  # Locked-in runway used for low-vis block selection
-windows_timer_period_active = False
-runway_var = None
-arrival_spawning_paused = False
-
-INBOUND_RADAR_SEGMENT_DURATION_SECONDS = 25.0
-INBOUND_RADAR_UPDATE_INTERVAL_MS = 16
-
-def build_movement_log_csv_path():
-    """Create a timestamped movement log filename, e.g. Movement_log_13_1041.csv."""
-    timestamp = datetime.now().strftime("%d_%H%M")
-    base_name = f"Movement_log_{timestamp}"
-    candidate = os.path.join(script_dir, f"{base_name}.csv")
-    if not os.path.exists(candidate):
-        return candidate
-
-    suffix = 1
-    while True:
-        candidate = os.path.join(script_dir, f"{base_name}_{suffix}.csv")
-        if not os.path.exists(candidate):
-            return candidate
-        suffix += 1
-
-
-MOVEMENTS_LOG_CSV_PATH = build_movement_log_csv_path()
 
 # Minimum gate turnaround before an arrival can push back (at 1x simulation speed).
 MIN_TURNAROUND_DELAY_MS = 15 * 60 * 1000
@@ -625,8 +597,6 @@ MIN_TURNAROUND_DELAY_MS = 15 * 60 * 1000
 MIN_PUSHBACK_GAP_SECONDS = 30
 MAX_PUSHBACK_GAP_SECONDS = 180
 next_pushback_release_time = 0.0
-manual_pushback_waiting = {}
-pushback_method_var = None
 
 # ==============================
 # SPEED CONTROL HELPER
@@ -635,31 +605,6 @@ SIMULATION_START_SECONDS = 9 * 60 * 60
 def adjust_delay(base_delay_ms):
     """Adjust a delay in milliseconds based on simulation speed multiplier."""
     return max(1, int(base_delay_ms / simulation_speed))
-
-
-def configure_windows_timer_resolution():
-    """Request 1ms timer resolution on Windows to stabilize tkinter after() timing."""
-    global windows_timer_period_active
-    if sys.platform != "win32" or windows_timer_period_active:
-        return
-    try:
-        result = ctypes.windll.winmm.timeBeginPeriod(1)
-        if result == 0:
-            windows_timer_period_active = True
-    except Exception:
-        windows_timer_period_active = False
-
-
-def restore_windows_timer_resolution():
-    """Release the Windows timer resolution request if it was enabled."""
-    global windows_timer_period_active
-    if sys.platform != "win32" or not windows_timer_period_active:
-        return
-    try:
-        ctypes.windll.winmm.timeEndPeriod(1)
-    except Exception:
-        pass
-    windows_timer_period_active = False
 
 def get_frame_timing_correction(base_delay_ms):
     """Return a multiplier to compensate for tkinter after() minimum-delay flooring.
@@ -709,59 +654,11 @@ def update_simulation_clock_display(current_sim_time=None):
     runtime_clock_var.set(format_clock_time(current_sim_time))
     sim_clock_var.set(format_clock_time(SIMULATION_START_SECONDS + current_sim_time, wrap_24h=True))
 
-
-def get_logging_operations_mode():
-    return "low visibility" if current_operations_mode == "Low Visibility Ops" else "normal"
-
-
-def get_logging_runway_in_use():
-    runway_selector = globals().get('runway_var')
-    if runway_selector is not None:
-        try:
-            return runway_selector.get()
-        except Exception:
-            pass
-    return current_low_visibility_runway
-
-
-def get_logging_lvp_stop_bars_enabled():
-    return "yes" if show_template_s_node_stop_bars else "no"
-
-
-def append_movement_log(callsign, movement_type):
-    """Append a takeoff/landing movement row to the CSV movement log."""
-    sim_clock = format_clock_time(SIMULATION_START_SECONDS + get_simulation_time(), wrap_24h=True)
-    row = {
-        "callsign": callsign,
-        "movement_type": movement_type,
-        "event_time": sim_clock,
-        "operations_mode": get_logging_operations_mode(),
-        "runway_in_use": get_logging_runway_in_use(),
-        "lvp_improvement_stop_bars": get_logging_lvp_stop_bars_enabled(),
-    }
-    header = list(row.keys())
-
-    try:
-        needs_header = (not os.path.exists(MOVEMENTS_LOG_CSV_PATH)) or os.path.getsize(MOVEMENTS_LOG_CSV_PATH) == 0
-        with open(MOVEMENTS_LOG_CSV_PATH, "a", newline="", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=header)
-            if needs_header:
-                writer.writeheader()
-            writer.writerow(row)
-    except Exception as exc:
-        print(f"Movement logging failed for {callsign}: {exc}")
-
 def set_simulation_speed(new_speed):
     """Update simulation speed while preserving continuous simulation time."""
     global simulation_speed
     get_simulation_time()
     simulation_speed = new_speed
-
-
-def set_arrival_spawning_paused(paused):
-    """Enable or disable automatic arrival spawning."""
-    global arrival_spawning_paused
-    arrival_spawning_paused = bool(paused)
 
 # ==============================
 # GRAPH DRAW FUNCTION
@@ -1194,8 +1091,6 @@ def is_low_visibility_section_entry_allowed(callsign, current_node, next_node):
 def get_current_taxi_speed():
     if current_operations_mode == "Low Visibility Ops":
         return LOW_VIS_TAXI_SPEED
-    # Keep taxi speed independent of simulation speed.
-    # Simulation acceleration is already handled by sim-time progression and adjusted delays.
     return NORMAL_OPS_TAXI_SPEED
 
 
@@ -1959,7 +1854,6 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
             # For non-runway segments, use original segment_points approach
             steps = len(segment_points)
             lookahead_points = 4
-            point_spacing = max(speed, 0.01)
 
             if 'heading' not in aircraft_info:
                 if steps > 1:
@@ -1968,22 +1862,9 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
                     aircraft_info['heading'] = math.degrees(math.atan2(y1 - y0, x1 - x0))
                 else:
                     aircraft_info['heading'] = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
-
-            def _point_at_cursor(cursor):
-                if steps <= 1:
-                    return segment_points[0]
-                idx = int(cursor)
-                if idx >= steps - 1:
-                    return segment_points[-1]
-                t = cursor - idx
-                x0, y0 = segment_points[idx]
-                x1, y1 = segment_points[idx + 1]
-                return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
-
-            aircraft_info['taxi_last_sim_time'] = get_simulation_time()
-
-            def animate_segment(cursor=0.0):
-                if cursor >= max(steps - 1, 0):
+            
+            def animate_segment(step=0):
+                if step >= steps:
                     # Reached next node, move to the next segment immediately without delay
                     aircraft_info['route_index'] = route_idx + 1
                     aircraft_info['node'] = next_node
@@ -1991,12 +1872,12 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
                     # Continue immediately to next segment for smooth transition
                     move_to_next_node()
                     return
-
-                curr_x, curr_y = _point_at_cursor(cursor)
+                
+                curr_x, curr_y = segment_points[step]
 
                 if steps > 1:
-                    look_cursor = min(cursor + lookahead_points, max(steps - 1, 0))
-                    look_x, look_y = _point_at_cursor(look_cursor)
+                    look_idx = min(step + lookahead_points, steps - 1)
+                    look_x, look_y = segment_points[look_idx]
                     turn_target = math.degrees(math.atan2(look_y - curr_y, look_x - curr_x))
                 else:
                     turn_target = aircraft_info['heading']
@@ -2033,8 +1914,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
                     rotated_points.extend([curr_x + rx, curr_y + ry])
 
                 if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
-                    aircraft_info['taxi_last_sim_time'] = get_simulation_time()
-                    app.after(adjust_delay(200), animate_segment, cursor)
+                    app.after(adjust_delay(200), animate_segment, step)
                     return
                 
                 canvas.coords(aircraft_info['triangle_id'], *rotated_points)
@@ -2044,16 +1924,9 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
                 history.append((curr_x, curr_y))
                 if len(history) > 400:
                     del history[:-300]
-
-                now_sim = get_simulation_time()
-                last_sim = aircraft_info.get('taxi_last_sim_time', now_sim)
-                sim_dt = max(0.0, now_sim - last_sim)
-                aircraft_info['taxi_last_sim_time'] = now_sim
-
-                cursor_step = max(0.05, (speed * sim_dt) / point_spacing)
-
+                
                 # Schedule next step
-                app.after(adjust_delay(50), animate_segment, cursor + cursor_step)
+                app.after(adjust_delay(50), animate_segment, step + 1)
         
         animate_segment()
     
@@ -2100,8 +1973,8 @@ def can_spawn_new_arrival(spawn_node_name):
     """Check if a new arrival can spawn at the given spawn node.
     
     Spacing requirement:
-    - Normal Ops: >=5.5 nodes from any arrival on final approach
-    - Low Visibility Ops: >=8 nodes from any arrival on final approach
+    - Normal Ops: >=7 nodes from any arrival on final approach
+    - Low Visibility Ops: >=10 nodes from any arrival on final approach
     
     Args:
         spawn_node_name: The node where the aircraft will spawn ("10m9" or "10m27")
@@ -2112,7 +1985,7 @@ def can_spawn_new_arrival(spawn_node_name):
     spawn_idx = RUNWAY_TICK_NODES.index(spawn_node_name)
     
     # Enforce arrival spacing minima based on operations mode.
-    min_spacing = 10 if current_operations_mode == "Low Visibility Ops" else 5.5
+    min_spacing = 10 if current_operations_mode == "Low Visibility Ops" else 7
     
     # Check all aircraft on the radar path
     for callsign, info in active_aircraft.items():
@@ -2239,7 +2112,6 @@ def takeoff_aircraft(canvas, aircraft_info, airborne_node):
     def animate_takeoff():
         distance_traveled = aircraft_info.get('takeoff_distance', 0.0)
         if distance_traveled >= total_distance:
-            append_movement_log(aircraft_info['callsign'], "takeoff")
             # Aircraft has left the screen - remove it from canvas
             canvas.delete(aircraft_info['triangle_id'])
             canvas.delete(aircraft_info['label_id'])
@@ -2939,7 +2811,7 @@ def find_available_stands():
             occupied_stands.add(target)
     return [stand for stand in stands if stand not in occupied_stands]
 
-def is_safe_to_move(callsign, next_x, next_y, min_distance=40):
+def is_safe_to_move(callsign, next_x, next_y, min_distance=28):
     """Check that the next position keeps a minimum separation from other aircraft."""
     for other_callsign, info in active_aircraft.items():
         if other_callsign == callsign:
@@ -3519,7 +3391,6 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
             # For non-runway segments, use original segment_points approach
             steps = len(segment_points)
             lookahead_points = 4
-            point_spacing = max(get_current_taxi_speed(), 0.01)
 
             if 'heading' not in aircraft_info:
                 if steps > 1:
@@ -3528,34 +3399,21 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
                     aircraft_info['heading'] = math.degrees(math.atan2(y1 - y0, x1 - x0))
                 else:
                     aircraft_info['heading'] = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
-
-            def _point_at_cursor(cursor):
-                if steps <= 1:
-                    return segment_points[0]
-                idx = int(cursor)
-                if idx >= steps - 1:
-                    return segment_points[-1]
-                t = cursor - idx
-                x0, y0 = segment_points[idx]
-                x1, y1 = segment_points[idx + 1]
-                return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)
-
-            aircraft_info['arrival_taxi_last_sim_time'] = get_simulation_time()
-
-            def animate_segment(cursor=0.0):
-                if cursor >= max(steps - 1, 0):
+            
+            def animate_segment(step=0):
+                if step >= steps:
                     # Reached next node, move to the next segment
                     aircraft_info['route_index'] = route_idx + 1
                     aircraft_info['node'] = next_node
                     aircraft_info['position'] = segment_points[-1]
                     move_to_next_node()
                     return
-
-                curr_x, curr_y = _point_at_cursor(cursor)
+                
+                curr_x, curr_y = segment_points[step]
 
                 if steps > 1:
-                    look_cursor = min(cursor + lookahead_points, max(steps - 1, 0))
-                    look_x, look_y = _point_at_cursor(look_cursor)
+                    look_idx = min(step + lookahead_points, steps - 1)
+                    look_x, look_y = segment_points[look_idx]
                     turn_target = math.degrees(math.atan2(look_y - curr_y, look_x - curr_x))
                 else:
                     turn_target = aircraft_info['heading']
@@ -3605,8 +3463,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
                     rotated_points.extend([curr_x + rx, curr_y + ry])
 
                 if not is_safe_to_move(aircraft_info['callsign'], curr_x, curr_y):
-                    aircraft_info['arrival_taxi_last_sim_time'] = get_simulation_time()
-                    app.after(adjust_delay(200), animate_segment, cursor)
+                    app.after(adjust_delay(200), animate_segment, step)
                     return
 
                 canvas.coords(aircraft_info['triangle_id'], *rotated_points)
@@ -3616,16 +3473,9 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
                 history.append((curr_x, curr_y))
                 if len(history) > 400:
                     del history[:-300]
-
-                now_sim = get_simulation_time()
-                last_sim = aircraft_info.get('arrival_taxi_last_sim_time', now_sim)
-                sim_dt = max(0.0, now_sim - last_sim)
-                aircraft_info['arrival_taxi_last_sim_time'] = now_sim
-
-                cursor_step = max(0.05, (get_current_taxi_speed() * sim_dt) / point_spacing)
-
+                
                 # Schedule next step
-                app.after(adjust_delay(50), animate_segment, cursor + cursor_step)
+                app.after(adjust_delay(50), animate_segment, step + 1)
         
         animate_segment()
     
@@ -3635,7 +3485,7 @@ def taxi_to_stand_after_landing(canvas, aircraft_info, destination_stand):
 # HOME SCREEN DISPLAY
 def build_home_screen():
     """Build the ATC home screen UI matching the provided PNG layout."""
-    global main_canvas, runtime_clock_var, sim_clock_var, pushback_method_var, runway_var  # Make canvas, clocks, and pushback mode accessible globally
+    global main_canvas, runtime_clock_var, sim_clock_var  # Make canvas and clocks accessible globally
     
     # Clear any existing widgets
     for widget in app.winfo_children():
@@ -3659,89 +3509,6 @@ def build_home_screen():
         
         main_canvas = tk.Canvas(canvas_frame, width=new_width, height=new_height, highlightthickness=0)
         main_canvas.pack()
-
-        def find_clicked_stand_node(click_x, click_y, threshold=18):
-            nearest_stand = None
-            nearest_distance = None
-            for node_name, (sx, sy) in nodes.items():
-                if not (node_name.startswith("STAND") and node_name[-1] in {"A", "a"}):
-                    continue
-                dx = click_x - sx
-                dy = click_y - sy
-                dist_sq = dx * dx + dy * dy
-                if dist_sq <= threshold * threshold and (nearest_distance is None or dist_sq < nearest_distance):
-                    nearest_distance = dist_sq
-                    nearest_stand = node_name
-            return nearest_stand
-
-        def trigger_manual_pushback_for_aircraft(aircraft_info):
-            callsign = aircraft_info.get('callsign')
-            if not callsign or callsign not in active_aircraft:
-                return False
-            stand_node = aircraft_info.get('node')
-            if not stand_node or not (stand_node.startswith("STAND") and stand_node[-1] in {"A", "a"}):
-                return False
-            turnaround_job_id = aircraft_info.pop('turnaround_job_id', None)
-            if turnaround_job_id:
-                try:
-                    app.after_cancel(turnaround_job_id)
-                except Exception:
-                    pass
-            pushback_wait_job_id = aircraft_info.pop('pushback_wait_job_id', None)
-            if pushback_wait_job_id:
-                try:
-                    app.after_cancel(pushback_wait_job_id)
-                except Exception:
-                    pass
-            manual_pushback_waiting.pop(callsign, None)
-            start_departure_from_stand(aircraft_info, stand_node, manual_authorized=True)
-            return True
-
-        def on_canvas_click(event):
-            if pushback_method_var is None or pushback_method_var.get() != "manual":
-                return
-            if not main_canvas:
-                return
-
-            click_x, click_y = event.x, event.y
-            overlapping = main_canvas.find_overlapping(click_x - 20, click_y - 20, click_x + 20, click_y + 20)
-
-            # 1) Try direct click on aircraft triangle/label first.
-            for callsign, ac in list(active_aircraft.items()):
-                triangle_id = ac.get('triangle_id')
-                label_id = ac.get('label_id')
-                if (triangle_id and triangle_id in overlapping) or (label_id and label_id in overlapping):
-                    if trigger_manual_pushback_for_aircraft(ac):
-                        return
-
-            # 2) If direct hit misses, pick nearest parked stand aircraft within a click radius.
-            nearest_aircraft = None
-            nearest_dist_sq = None
-            nearest_radius = 45
-            for callsign, ac in list(active_aircraft.items()):
-                stand_node = ac.get('node')
-                if not stand_node or not (stand_node.startswith("STAND") and stand_node[-1] in {"A", "a"}):
-                    continue
-                pos = ac.get('position')
-                if not pos:
-                    continue
-                dx = click_x - pos[0]
-                dy = click_y - pos[1]
-                dist_sq = dx * dx + dy * dy
-                if dist_sq <= nearest_radius * nearest_radius and (nearest_dist_sq is None or dist_sq < nearest_dist_sq):
-                    nearest_dist_sq = dist_sq
-                    nearest_aircraft = ac
-            if nearest_aircraft and trigger_manual_pushback_for_aircraft(nearest_aircraft):
-                return
-
-            # 3) Final fallback: stand-click pushback.
-            clicked_stand = find_clicked_stand_node(click_x, click_y)
-            if not clicked_stand:
-                return
-            for callsign, ac in list(active_aircraft.items()):
-                if ac.get('node') == clicked_stand:
-                    trigger_manual_pushback_for_aircraft(ac)
-                    return
         
         # Draw the map image on the canvas
         top_photo = ImageTk.PhotoImage(top_img)
@@ -3756,9 +3523,6 @@ def build_home_screen():
         
         # Draw stop bars (always enabled)
         draw_stop_bars(main_canvas)
-
-        # Allow manual pushback control by clicking aircraft or occupied stand.
-        main_canvas.bind("<Button-1>", on_canvas_click)
         
     except Exception as e:
         print(f"Error loading map image: {e}")
@@ -3830,15 +3594,6 @@ def build_home_screen():
     # Toggle Graph Button
     ctk.CTkButton(lvp_frame, text="Toggle Nodes/Edges", command=toggle_graph_visibility).pack(anchor="w", pady=(10, 5))
 
-    # Pushback method selector
-    pushback_frame = ctk.CTkFrame(controls_main)
-    pushback_frame.pack(side="left", padx=20, pady=10)
-
-    ctk.CTkLabel(pushback_frame, text="Pushback method", font=("Arial", 14, "bold")).pack(anchor="w", pady=(0, 10))
-    pushback_method_var = tk.StringVar(value="automatic")
-    ctk.CTkRadioButton(pushback_frame, text="Manual", variable=pushback_method_var, value="manual").pack(anchor="w", pady=5)
-    ctk.CTkRadioButton(pushback_frame, text="Automatic", variable=pushback_method_var, value="automatic").pack(anchor="w", pady=5)
-
     # Center: Movements per hour / Delays in columnar format (matches status board style)
     data_frame = ctk.CTkFrame(controls_main)
     data_frame.pack(side="left", padx=20, pady=0, fill="both", expand=True)
@@ -3852,10 +3607,10 @@ def build_home_screen():
     sim_clock_var = tk.StringVar(value="09:00:00")
 
     metrics = [
-        #("Movements Per Hour", movements_per_hour_var),
-        #("Delays", delays_var),
-        #("Average Taxi Time", avg_taxi_time_var),
-        #("Runway Utilisation", runway_util_var),
+        ("Movements Per Hour", movements_per_hour_var),
+        ("Delays", delays_var),
+        ("Average Taxi Time", avg_taxi_time_var),
+        ("Runway Utilisation", runway_util_var),
         ("Runtime Clock", runtime_clock_var),
         ("Sim Clock", sim_clock_var),
     ]
@@ -3913,7 +3668,6 @@ def build_home_screen():
                 main_canvas.delete(ac_info['label_id'])
             remove_aircraft_from_status(callsign)
         active_aircraft.clear()
-        manual_pushback_waiting.clear()
         next_pushback_release_time = 0.0
 
     def generate_unique_callsign(prefix=None):
@@ -3954,7 +3708,7 @@ def build_home_screen():
             return random.randint(20, 90)
         return random.randint(30, 120)
 
-    def start_departure_from_stand(aircraft_info, stand_node, manual_authorized=False):
+    def start_departure_from_stand(aircraft_info, stand_node):
         """Convert a parked aircraft into a departure and start pushback."""
         if not main_canvas:
             return
@@ -4023,33 +3777,23 @@ def build_home_screen():
             if aircraft_info.get('node') != stand_node:
                 return
 
-            if pushback_method_var is not None and pushback_method_var.get() == "manual" and not manual_authorized:
-                aircraft_info['waiting_for_pushback_clearance'] = True
-                manual_pushback_waiting[callsign] = {
-                    'aircraft_info': aircraft_info,
-                    'stand_node': stand_node,
-                }
-                return
-
             now_sim = get_simulation_time()
-            if not manual_authorized and now_sim < next_pushback_release_time:
+            if now_sim < next_pushback_release_time:
                 aircraft_info['waiting_for_pushback_clearance'] = True
                 aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
                 return
 
-            if not manual_authorized and not is_pushback_path_clear(callsign, stand_node, stand_pushback_node):
+            if not is_pushback_path_clear(callsign, stand_node, stand_pushback_node):
                 aircraft_info['waiting_for_pushback_clearance'] = True
                 aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
                 return
 
             aircraft_info['waiting_for_pushback_clearance'] = False
             aircraft_info.pop('pushback_wait_job_id', None)
-            manual_pushback_waiting.pop(callsign, None)
 
             # Once this pushback starts, reserve the next pushback release at a random
             # interval between 30 seconds and 3 minutes.
-            if not manual_authorized:
-                next_pushback_release_time = now_sim + random.randint(MIN_PUSHBACK_GAP_SECONDS, MAX_PUSHBACK_GAP_SECONDS)
+            next_pushback_release_time = now_sim + random.randint(MIN_PUSHBACK_GAP_SECONDS, MAX_PUSHBACK_GAP_SECONDS)
             pushback_aircraft(main_canvas, aircraft_info, stand_pushback_node, final_direction, runway_target=runway_target)
 
         aircraft_info['pushback_wait_job_id'] = app.after(adjust_delay(1000), attempt_pushback)
@@ -4087,23 +3831,14 @@ def build_home_screen():
     schedule_turnaround_cb = schedule_turnaround
 
     def seed_initial_aircraft():
-        """Seed parked departures by selected traffic flow rate and stagger pushbacks."""
+        """Seed 5-10 parked departures on random stands and stagger pushbacks."""
         if not main_canvas:
             return
         import random
         available_stands = find_available_stands()
         if not available_stands:
             return
-
-        rate = tfr_var.get()
-        if rate == "High":
-            min_seed, max_seed = 13, 16
-        elif rate == "Medium":
-            min_seed, max_seed = 7, 12
-        else:
-            min_seed, max_seed = 3, 7
-
-        seed_count = min(len(available_stands), random.randint(min_seed, max_seed))
+        seed_count = min(len(available_stands), random.randint(5, 10))
         seed_stands = random.sample(available_stands, seed_count)
 
         for stand_node in seed_stands:
@@ -4180,7 +3915,9 @@ def build_home_screen():
             if len(path_nodes) < 2:
                 return
 
-            segment_duration_sim_seconds = max(0.001, INBOUND_RADAR_SEGMENT_DURATION_SECONDS)
+            segment_duration_ms = 28000
+            frame_interval_ms = 50
+            steps_per_segment = max(1, int(segment_duration_ms / frame_interval_ms))
             dot_radius = 3
 
             start_x, start_y = nodes[path_nodes[0]]
@@ -4208,7 +3945,7 @@ def build_home_screen():
                 'target_stand': available_stand
             }
 
-            def move_segment(segment_idx=0, segment_start_sim_time=None):
+            def move_segment(segment_idx=0, step_idx=0):
                 if callsign not in active_aircraft:
                     main_canvas.delete(radar_dot_id)
                     if 'radar_label_id' in active_aircraft.get(callsign, {}):
@@ -4233,7 +3970,6 @@ def build_home_screen():
                         'target_stand': available_stand
                     }
                     active_aircraft[callsign] = aircraft_info
-                    append_movement_log(callsign, "landing")
                     # Move to Runway status immediately to prevent departures
                     move_aircraft_status(callsign, 'Runway')
                     app.after(adjust_delay(500), lambda: landing_aircraft(main_canvas, aircraft_info, runway_exit))
@@ -4243,11 +3979,7 @@ def build_home_screen():
                 seg_end = nodes[path_nodes[segment_idx + 1]]
                 dx = seg_end[0] - seg_start[0]
                 dy = seg_end[1] - seg_start[1]
-
-                if segment_start_sim_time is None:
-                    segment_start_sim_time = get_simulation_time()
-                elapsed_sim = max(0.0, get_simulation_time() - segment_start_sim_time)
-                t = min(1.0, elapsed_sim / segment_duration_sim_seconds)
+                t = min(1.0, step_idx / steps_per_segment)
                 x = seg_start[0] + dx * t
                 y = seg_start[1] + dy * t
                 main_canvas.coords(
@@ -4259,12 +3991,12 @@ def build_home_screen():
                     main_canvas.coords(active_aircraft[callsign]['radar_label_id'], x, y - 12)
                 active_aircraft[callsign]['position'] = (x, y)
 
-                if t >= 1.0:
+                if step_idx >= steps_per_segment:
                     active_aircraft[callsign]['node'] = path_nodes[segment_idx + 1]
-                    app.after(INBOUND_RADAR_UPDATE_INTERVAL_MS, lambda: move_segment(segment_idx + 1, None))
+                    app.after(adjust_delay(frame_interval_ms), lambda: move_segment(segment_idx + 1, 0))
                     return
 
-                app.after(INBOUND_RADAR_UPDATE_INTERVAL_MS, lambda: move_segment(segment_idx, segment_start_sim_time))
+                app.after(adjust_delay(frame_interval_ms), lambda: move_segment(segment_idx, step_idx + 1))
 
             move_segment()
 
@@ -4288,14 +4020,14 @@ def build_home_screen():
         available_stands = find_available_stands()
         can_arrive = len(available_stands) > 0 and is_runway_clear()
 
-        if can_arrive and not arrival_spawning_paused:
+        if can_arrive:
             spawn_landing_aircraft()
 
         delay_ms = get_activity_delay_ms()
         activity_job_id = app.after(adjust_delay(delay_ms), schedule_next_activity)
 
     def start_activity():
-        global simulation_running, activity_job_id, simulation_time_seconds, last_sim_real_time, next_departure_release_time, next_pushback_release_time, arrival_spawning_paused
+        global simulation_running, activity_job_id, simulation_time_seconds, last_sim_real_time, next_departure_release_time, next_pushback_release_time
         if simulation_running:
             return
         clear_existing_aircraft()
@@ -4305,7 +4037,6 @@ def build_home_screen():
         last_sim_real_time = time.perf_counter()
         next_departure_release_time = 0.0
         next_pushback_release_time = 0.0
-        arrival_spawning_paused = False
         simulation_running = True
         update_simulation_clock_display(0.0)
         seed_initial_aircraft()
@@ -4350,26 +4081,6 @@ def build_home_screen():
     speed_btn.pack(pady=(0, 10))
     speed_btn_ref.append(speed_btn)
 
-    arrival_pause_btn_ref = []
-
-    def toggle_arrival_pause():
-        new_state = not arrival_spawning_paused
-        set_arrival_spawning_paused(new_state)
-        arrival_pause_btn_ref[0].configure(text="Resume Arrivals" if new_state else "Pause Arrivals")
-
-    arrival_pause_btn = ctk.CTkButton(
-        button_panel,
-        text="Pause Arrivals",
-        font=("Arial", 12, "bold"),
-        fg_color="#f39c12",
-        hover_color="#d68910",
-        height=40,
-        width=150,
-        command=toggle_arrival_pause
-    )
-    arrival_pause_btn.pack(pady=(0, 10))
-    arrival_pause_btn_ref.append(arrival_pause_btn)
-
     # ===== BOTTOM SECTION: Status Board =====
     status_frame = ctk.CTkFrame(app)
     status_frame.pack(fill="both", expand=True, padx=10, pady=10)
@@ -4407,23 +4118,13 @@ if __name__ == "__main__":
     if not HAS_CTK:
         print("customtkinter is not installed. To run the GUI locally, install customtkinter and run this file directly.")
     else:
-        configure_windows_timer_resolution()
         app = ctk.CTk()
         app.title("Airport Control Panel")
         app.geometry(f"{screen_width}x{screen_height}+100+100")
         app.minsize(800, 600)
         app.state("zoomed")
-
-        def on_app_close():
-            restore_windows_timer_resolution()
-            app.destroy()
-
-        app.protocol("WM_DELETE_WINDOW", on_app_close)
         # Build the home screen and start the GUI
         build_home_screen()
         # Start continuous stop bar updates
         continuous_stop_bar_update()
-        try:
-            app.mainloop()
-        finally:
-            restore_windows_timer_resolution()
+        app.mainloop()

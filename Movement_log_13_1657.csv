@@ -1,0 +1,12 @@
+callsign,movement_type,event_time,operations_mode,runway_in_use,lvp_improvement_stop_bars
+EXS31LS,landing,09:04:25,low visibility,27,yes
+WIZZ44CO,landing,09:08:53,low visibility,27,yes
+EZY400,landing,09:14:21,low visibility,27,yes
+EZY912,landing,09:19:40,low visibility,27,yes
+EXS463,takeoff,09:27:48,low visibility,27,yes
+EZY229,takeoff,09:36:56,low visibility,27,yes
+WIZZ69MK,takeoff,09:43:31,low visibility,27,yes
+EXS67AV,landing,09:47:58,low visibility,27,yes
+RYR871,takeoff,09:50:07,low visibility,27,yes
+RYR2XS,landing,09:54:43,low visibility,27,yes
+RYR63JY,takeoff,10:01:06,low visibility,27,yes
