@@ -1201,7 +1201,7 @@ def get_current_taxi_speed():
 
 def get_departure_gap_min_nodes():
     if current_operations_mode == "Low Visibility Ops":
-        return 6
+        return 7
     return 3
 
 
@@ -1615,6 +1615,30 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
     aircraft_info.pop('heading', None)
     aircraft_info['path_history'] = [aircraft_info.get('position', nodes[current_node])]
 
+    base_segment_speed = max(speed, 0.01)
+
+    def _get_segment_speed(route_idx):
+        segment_speed = speed
+        runway_27_boost = (
+            current_operations_mode == "Low Visibility Ops"
+            and route
+            and route[0] == "A2_HOLD"
+            and destination_node == "RWY27_A1_ALIGN"
+            and "RWY27_A1_ALIGN" in route
+            and route.index("RWY27_A1_ALIGN") > route_idx
+        )
+        runway_09_boost = (
+            current_operations_mode == "Low Visibility Ops"
+            and route
+            and route[0] == "E2_HOLD"
+            and destination_node == "RWY09_E1_ALIGN"
+            and "RWY09_E1_ALIGN" in route
+            and route.index("RWY09_E1_ALIGN") > route_idx
+        )
+        if runway_27_boost or runway_09_boost:
+            segment_speed *= 2.5
+        return segment_speed
+
     def _rear_from_history(history, wheelbase):
         if not history:
             return nodes[current_node]
@@ -1630,7 +1654,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
                 return rx, ry
             dist += seg
         return history[0]
-    
+
     def move_to_next_node():
         """Move aircraft to the next node in the route."""
         route_idx = aircraft_info.get('route_index', 0)
@@ -1641,11 +1665,11 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
             aircraft_info['position'] = nodes[destination_node]
             
             # Check if we've reached a hold point and should proceed to runway
-            if destination_node in ["A1_HOLD", "A2_HOLD", "E1_HOLD"]:
+            if destination_node in ["A1_HOLD", "A2_HOLD", "E1_HOLD", "E2_HOLD"]:
                 # Determine runway entry point based on hold point
                 if destination_node in ["A1_HOLD", "A2_HOLD"]:
                     runway_entry = "RWY27_A1_ALIGN"
-                else:  # E1_HOLD
+                else:  # E1_HOLD / E2_HOLD
                     runway_entry = "RWY09_E1_ALIGN"
                 
                 # Continue to runway entry point after brief hold
@@ -1745,6 +1769,9 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
             aircraft_info['segment_start_override'] = next_start_override
             aircraft_info['segment_start_override_idx'] = route_idx + 1
 
+        segment_speed = _get_segment_speed(route_idx)
+        segment_speed_scale = segment_speed / base_segment_speed
+
         # Calculate distance and direction
         dx = end_x - start_x
         dy = end_y - start_y
@@ -1788,7 +1815,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
         
         if use_distance_stepping:
             # For runway segments, use distance-based animation like landing_aircraft
-            avg_speed = get_current_taxi_speed()
+            avg_speed = segment_speed
             steps = max(int(distance / avg_speed), 1)
             
             def animate_segment(step=0):
@@ -1821,7 +1848,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
                     ux, uy = 0.0, 0.0
                 
                 remaining = aircraft_info.get('segment_remaining_distance', distance)
-                move_dist = min(speed, remaining)
+                move_dist = min(segment_speed, remaining)
                 step_x = ux * move_dist
                 step_y = uy * move_dist
                 
@@ -1959,7 +1986,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
             # For non-runway segments, use original segment_points approach
             steps = len(segment_points)
             lookahead_points = 4
-            point_spacing = max(speed, 0.01)
+            point_spacing = base_segment_speed
 
             if 'heading' not in aircraft_info:
                 if steps > 1:
@@ -2050,7 +2077,7 @@ def taxi_aircraft(canvas, aircraft_info, destination_node, speed=None):
                 sim_dt = max(0.0, now_sim - last_sim)
                 aircraft_info['taxi_last_sim_time'] = now_sim
 
-                cursor_step = max(0.05, (speed * sim_dt) / point_spacing)
+                cursor_step = max(0.05, (base_segment_speed * sim_dt) / point_spacing) * segment_speed_scale
 
                 # Schedule next step
                 app.after(adjust_delay(50), animate_segment, cursor + cursor_step)
@@ -2147,7 +2174,7 @@ def is_arrival_within_5_5nm():
 def is_arrival_within_5nm():
     """Check if any arrival is within the departure-gap threshold of runway center.
 
-    Normal Ops threshold is 3 nodes and Low Visibility threshold is 4 nodes.
+    Normal Ops threshold is 3 nodes and Low Visibility threshold is 7 nodes.
     """
     center_idx_09 = RUNWAY_TICK_NODES.index("0m9")
     center_idx_27 = RUNWAY_TICK_NODES.index("0m27")
@@ -2940,15 +2967,47 @@ def find_available_stands():
     return [stand for stand in stands if stand not in occupied_stands]
 
 def is_safe_to_move(callsign, next_x, next_y, min_distance=40):
-    """Check that the next position keeps a minimum separation from other aircraft."""
+    """Check that the next position keeps safe separation from other aircraft.
+
+    Nearby aircraft behind the movement direction should not block forward progress,
+    but very-close rear overlap is still prevented.
+    """
+    own_info = active_aircraft.get(callsign, {})
+    own_pos = own_info.get('position')
+
+    move_dx = move_dy = 0.0
+    move_len = 0.0
+    if own_pos:
+        move_dx = next_x - own_pos[0]
+        move_dy = next_y - own_pos[1]
+        move_len = math.hypot(move_dx, move_dy)
+
     for other_callsign, info in active_aircraft.items():
         if other_callsign == callsign:
             continue
+
         other_pos = info.get('position')
         if not other_pos:
             continue
-        if math.hypot(other_pos[0] - next_x, other_pos[1] - next_y) < min_distance:
-            return False
+
+        rel_dx = other_pos[0] - next_x
+        rel_dy = other_pos[1] - next_y
+        distance = math.hypot(rel_dx, rel_dy)
+        if distance >= min_distance:
+            continue
+
+        if move_len > 1e-6:
+            unit_dx = move_dx / move_len
+            unit_dy = move_dy / move_len
+            forward_projection = rel_dx * unit_dx + rel_dy * unit_dy
+
+            # If nearby traffic is clearly behind us, allow movement unless it is
+            # very close (tail overlap / clipping risk).
+            if forward_projection < -6.0 and distance > 16.0:
+                continue
+
+        return False
+
     return True
 
 def should_nr_yield_to_as_at_ar(callsign, merge_clearance_px=55):
@@ -3994,12 +4053,12 @@ def build_home_screen():
             return
 
         runway = runway_var.get()
-        # Runway 09 departures taxi toward E1 (west/left), runway 27 departures taxi toward A1 (east/right)
+        # Runway 09 departures taxi toward E1/E2 (west/left), runway 27 departures taxi toward A1/A2 (east/right)
         final_direction = "left" if runway == "09" else "right"
         if runway == "27":
             runway_target = "A2_HOLD" if current_operations_mode == "Low Visibility Ops" else "A1_HOLD"
         else:
-            runway_target = "E1_HOLD"
+            runway_target = "E2_HOLD" if current_operations_mode == "Low Visibility Ops" else "E1_HOLD"
 
         # Special pushback heading handling for side stands.
         # For runway 27, stands 19/20 should remain south-facing during most of pushback,
