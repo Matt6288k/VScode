@@ -904,7 +904,7 @@ S_NODE_STOP_BAR_BLOCKS_RWY27 = {
     "S4": {"A3"},
     "S5": {"S4"},
     "STAND21N": {"S5", "AR",},
-    "S6": {"STAND21N", "AR", "S5", "ROMEO"},
+    "S6": {"STAND21N", "AR", "S5", "ROMEO"},\
     "A4": {"S6"},
     "S7": {"A4"},
     "Stand_Stop_Bar": {"AS", "S7", "S8"},
@@ -994,7 +994,7 @@ LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY27 = {
 # Runway 09 specific low visibility blocks
 # Priority: STAND19N > A5; STAND21N does not interact with A4
 LOW_VISIBILITY_STOP_BAR_BLOCKS_RWY09 = {
-    "A3": {"TXY_B1", "S3", "S2", "S1","A2_HOLD"},
+    "A3": {"S4" , "S5", "AR", "S6","STAND21N", "A4"},
     "A4": {"S4", "S5", "AR", "S6","A3"},
     "STAND21N": {"STAND5N","STAND6N", "STAND7N","STAND8N","STAND18N","NR", "ROMEO", "N_2"},
     "A5": {"AQ", "S9","S10", "TXY_C1", "STAND19N"},
